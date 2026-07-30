@@ -1,0 +1,13 @@
+﻿{
+    "fetchedAt":  "2026-07-30T08:54:05.8136824Z",
+    "dll":  "bin/libmpv-2.dll",
+    "platform":  "windows-x64",
+    "source":  {
+                   "preference":  "mpv-dev-lgpl",
+                   "asset":  "mpv-dev-lgpl-x86_64-20260729-git-74356c0fc6.7z",
+                   "tag":  "2026-07-29-74356c0fc6",
+                   "owner":  "zhongfly",
+                   "repo":  "mpv-winbuild"
+               },
+    "dllSha256":  "92ece43ba5804521074b8504f4a1252f7efaacc4a7eb025f3b2023c551a29dcc"
+}
