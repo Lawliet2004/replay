@@ -20,15 +20,16 @@
         "minWidth": 640,
         "minHeight": 400,
         "resizable": true,
+        "maximized": true,
         "fullscreen": false,
-        "transparent": true,
-        "decorations": true,
+        "transparent": false,
+        "decorations": false,
         "shadow": true,
         "dragDropEnabled": true
       }
     ],
     "security": {
-      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: asset: https://asset.localhost; media-src 'none'; connect-src ipc: http://ipc.localhost"
+      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: asset: https://asset.localhost; media-src 'none'; connect-src ipc: http://ipc.localhost http://127.0.0.1:* http://localhost:* ws://localhost:*"
     }
   },
   "bundle": {

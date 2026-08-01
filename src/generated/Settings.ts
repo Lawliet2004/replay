@@ -9,6 +9,8 @@ export type Settings = {
   volume: number;
   muted: boolean;
   speed: number;
+  fxEnabled: boolean;
+  fxPreset: string;
   repeat: RepeatMode;
   resumeEnabled: boolean;
   autoplayNext: boolean;
@@ -17,6 +19,10 @@ export type Settings = {
   rememberWindow: boolean;
   windowWidth: number;
   windowHeight: number;
+  /**
+   * Keyboard seek step in seconds (←/→ and J/L).
+   */
+  seekStepSecs: number;
   recent: Array<MediaItem>;
   resumePositions: Array<ResumeEntry>;
 };

@@ -11,17 +11,42 @@ pub struct HostHandle {
     pub wid: i64,
 }
 
+/// Regions to punch out of an opaque video host so HTML chrome stays visible.
+/// All values are physical pixels in host client coordinates; `0` = no cutout.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ChromeCutout {
+    /// Full-width strip at the top (custom title bar).
+    pub top: u32,
+    /// Full-width strip at the bottom (control chrome).
+    pub bottom: u32,
+    /// Full-height strip on the right (drawers).
+    pub right: u32,
+    /// Free-floating rect for the ⋯ menu panel. Zero size disables it.
+    pub menu_x: u32,
+    pub menu_y: u32,
+    pub menu_w: u32,
+    pub menu_h: u32,
+}
+
 pub trait VideoHost: Send {
     fn handle(&self) -> HostHandle;
     fn set_bounds(&mut self, x: i32, y: i32, w: u32, h: u32) -> Result<(), AppError>;
+    /// Punch HTML chrome / overlay holes out of an opaque host (Windows HWND_TOP). Default no-op.
+    fn set_chrome_cutout(&mut self, _cutout: ChromeCutout) -> Result<(), AppError> {
+        Ok(())
+    }
     fn set_visible(&mut self, visible: bool) -> Result<(), AppError>;
     fn destroy(&mut self);
+    /// Optional diagnostic string for logs / verification.
+    fn diagnose(&self) -> String {
+        format!("wid={}", self.handle().wid)
+    }
 }
 
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
-pub use windows::WindowsVideoHost;
+pub use windows::{install_activity_hook, uninstall_activity_hook, WindowsVideoHost};
 
 #[cfg(all(unix, not(target_os = "macos")))]
 mod x11;

@@ -8,9 +8,17 @@ Player actor → atomic JSON settings/history + structured logs/errors
 
 ## Windows
 
-- Transparent Tauri webview overlay for controls.
-- Child Win32 `HWND` hosted under the main window; libmpv `wid` points at that child.
-- `libmpv-2.dll` is loaded dynamically via `libloading` (same C ABI as `libmpv2-sys`) so MSVC apps can use MinGW LGPL builds without import-lib friction.
+- **Opaque** Tauri webview (not transparent). Sibling HWNDs do not alpha-blend; a
+  transparent webview reveals the desktop, not a child sitting underneath.
+- Child Win32 `HWND` for libmpv `wid` is created/resized/destroyed on the **UI thread**
+  and stacked with **`HWND_TOP`** above WebView2 so video frames are visible.
+- Host + libmpv VO children are hit-test transparent so mouse move reaches the overlay.
+- YouTube-like chrome: show on pointer activity; hide after 500ms while playing.
+  The video host stays **full-bleed** (correct aspect / no chrome-induced
+  pillarboxing); a `SetWindowRgn` cutout reveals the bottom HTML control strip
+  while chrome is visible. Paused / drawers / overflow menu pin chrome.
+- `wid` is set **before** `mpv_initialize` so the VO embeds from the first frame.
+- `libmpv-2.dll` is loaded dynamically via `libloading`.
 
 ## Linux
 
@@ -24,6 +32,7 @@ Player actor → atomic JSON settings/history + structured logs/errors
 
 ## Actor model
 
-- One dedicated thread owns each libmpv session.
+- One dedicated thread owns each libmpv session (never owns the Win32 host HWND).
 - Commands carry `request_id`; load generations discard stale events; snapshots use monotonic `revision`.
 - Position samples are capped at 4 Hz; the timeline interpolates only in UI.
+- Settings persistence is debounced and written on a background thread so open/seek never block on disk.

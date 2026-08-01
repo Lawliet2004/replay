@@ -190,6 +190,12 @@ pub enum MpvClientEvent {
 
 impl Mpv {
     pub fn new() -> Result<Self, AppError> {
+        Self::new_with_wid(0)
+    }
+
+    /// Create and initialize libmpv. When `wid != 0`, embed into that native window
+    /// **before** `mpv_initialize` so the VO targets our host from the first frame.
+    pub fn new_with_wid(wid: i64) -> Result<Self, AppError> {
         let api = load_api()?;
         let handle = unsafe { (api.create)() };
         if handle.is_null() {
@@ -200,8 +206,16 @@ impl Mpv {
             ));
         }
         let mpv = Self { api, handle };
+        // Before initialize, set_property acts as set_option (libmpv contract).
+        if wid != 0 {
+            mpv.set_int64("wid", wid)?;
+        }
         mpv.apply_safe_defaults()?;
         mpv.check(unsafe { (mpv.api.initialize)(mpv.handle) }, "initialize")?;
+        // Re-assert after init in case a default VO touched windowing.
+        if wid != 0 {
+            let _ = mpv.set_int64("wid", wid);
+        }
         Ok(mpv)
     }
 
@@ -218,9 +232,15 @@ impl Mpv {
         self.set_string("idle", "yes")?;
         self.set_string("force-window", "no")?;
         self.set_string("terminal", "no")?;
-        self.set_string("msg-level", "all=error")?;
+        self.set_string("msg-level", "all=warn")?;
         self.set_string("sub-auto", "fuzzy")?;
         self.set_string("audio-display", "no")?;
+        // Prefer embedded rendering into our host HWND/view.
+        self.set_string("vo", "gpu")?;
+        #[cfg(windows)]
+        {
+            let _ = self.set_string("gpu-context", "d3d11");
+        }
         Ok(())
     }
 
@@ -270,6 +290,29 @@ impl Mpv {
 
     pub fn set_speed(&self, speed: f64) -> Result<(), AppError> {
         self.set_double("speed", speed.clamp(0.25, 3.0))
+    }
+
+    /// Apply Replay's lightweight desktop FX chain inside libmpv.
+    /// The chain is intentionally conservative and uses libavfilter primitives
+    /// available in the bundled libmpv build; clearing it is a bit-transparent
+    /// bypass for desktop playback.
+    pub fn set_audio_fx(&self, enabled: bool, preset: &str) -> Result<(), AppError> {
+        if !enabled || preset.eq_ignore_ascii_case("flat") {
+            return self.command(&["af", "clr"]);
+        }
+        let chain = match preset.to_ascii_lowercase().as_str() {
+            "vocal" | "podcast" | "clear" => {
+                "lavfi=[equalizer=f=250:t=q:w=1:g=-1,equalizer=f=2500:t=q:w=1:g=2,acompressor=threshold=-20dB:ratio=2:attack=10:release=120,alimiter=limit=0.9]"
+            }
+            "bass boost" | "music" | "warm" => {
+                "lavfi=[equalizer=f=80:t=q:w=1:g=3,equalizer=f=400:t=q:w=1:g=1,acompressor=threshold=-18dB:ratio=2:attack=10:release=100,alimiter=limit=0.9]"
+            }
+            "movies" | "gaming" => {
+                "lavfi=[equalizer=f=100:t=q:w=1:g=2,equalizer=f=4000:t=q:w=1:g=2,acompressor=threshold=-18dB:ratio=2.5:attack=8:release=100,alimiter=limit=0.9]"
+            }
+            _ => "lavfi=[acompressor=threshold=-18dB:ratio=2:attack=10:release=100,alimiter=limit=0.9]",
+        };
+        self.command(&["af", "set", chain])
     }
 
     pub fn set_sub_delay(&self, secs: f64) -> Result<(), AppError> {

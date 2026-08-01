@@ -22,4 +22,4 @@ Cover when possible: MP4/MKV/WebM, MP3/FLAC/Opus, multi-audio/subtitle, SRT/ASS/
 
 ## Performance / stability gates
 
-Documented targets: shell visible &lt;1s cold, loading feedback &lt;100ms, first frame for reference 1080p &lt;1.5s, no sustained &gt;20% memory growth after 50 open/play/stop cycles, one-hour playback without crash/deadlock.
+Documented targets: shell visible &lt;1s cold, loading feedback &lt;100ms, first frame for reference 1080p &lt;1.5s, no sustained &gt;20% memory growth after 50 open/play cycles, one-hour playback without crash/deadlock.

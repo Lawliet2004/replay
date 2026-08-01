@@ -48,6 +48,20 @@ impl SettingsStore {
         atomic_write_json(&self.path, &self.settings)
     }
 
+    /// Fire-and-forget persist so the player actor never blocks on disk I/O.
+    pub fn save_async(&self) {
+        let path = self.path.clone();
+        let settings = self.settings.clone();
+        std::thread::Builder::new()
+            .name("replay-settings".into())
+            .spawn(move || {
+                if let Err(err) = atomic_write_json(&path, &settings) {
+                    tracing::warn!(error = %err.message, "async settings save failed");
+                }
+            })
+            .ok();
+    }
+
     pub fn remember_opened(&mut self, path: &str) {
         let item = MediaItem {
             id: path.to_string(),
@@ -96,6 +110,14 @@ impl SettingsStore {
         next.resume_positions.truncate(MAX_RESUME_ENTRIES);
         next.volume = next.volume.clamp(0.0, 150.0);
         next.speed = next.speed.clamp(0.25, 3.0);
+        // Allowed seek steps: 5 / 10 / 20 / 30 / 60 seconds.
+        const ALLOWED: [f64; 5] = [5.0, 10.0, 20.0, 30.0, 60.0];
+        if !ALLOWED
+            .iter()
+            .any(|v| (*v - next.seek_step_secs).abs() < f64::EPSILON)
+        {
+            next.seek_step_secs = 5.0;
+        }
         self.settings = next;
         self.save()?;
         Ok(&self.settings)

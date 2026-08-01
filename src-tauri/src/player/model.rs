@@ -4,7 +4,7 @@ use crate::error::{AppError, ErrorCode};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-pub const SETTINGS_VERSION: u32 = 1;
+pub const SETTINGS_VERSION: u32 = 3;
 pub const MAX_PLAYLIST_ITEMS: usize = 500;
 pub const MAX_RECENTS: usize = 50;
 pub const MAX_RESUME_ENTRIES: usize = 200;
@@ -183,9 +183,6 @@ pub enum PlayerCommand {
     TogglePause {
         request_id: String,
     },
-    Stop {
-        request_id: String,
-    },
     Seek {
         request_id: String,
         position_secs: f64,
@@ -203,6 +200,11 @@ pub enum PlayerCommand {
         request_id: String,
         speed: f64,
     },
+    SetAudioFx {
+        request_id: String,
+        enabled: bool,
+        preset: String,
+    },
     SetFullscreen {
         request_id: String,
         fullscreen: bool,
@@ -211,6 +213,24 @@ pub enum PlayerCommand {
         request_id: String,
         width: u32,
         height: u32,
+        /// Physical px to punch out at the bottom for HTML chrome. `0` = full-bleed.
+        #[serde(default)]
+        chrome_bottom: u32,
+        /// Physical px to punch out at the top for the custom title bar. `0` = full-bleed.
+        #[serde(default)]
+        chrome_top: u32,
+        /// Physical px to punch out on the right for drawers. `0` = none.
+        #[serde(default)]
+        chrome_right: u32,
+        /// Measured ⋯ menu panel rect (physical px, client coords). Zero size = none.
+        #[serde(default)]
+        menu_x: u32,
+        #[serde(default)]
+        menu_y: u32,
+        #[serde(default)]
+        menu_w: u32,
+        #[serde(default)]
+        menu_h: u32,
     },
     Next {
         request_id: String,
@@ -291,6 +311,10 @@ pub struct Settings {
     pub volume: f64,
     pub muted: bool,
     pub speed: f64,
+    #[serde(default = "default_fx_enabled")]
+    pub fx_enabled: bool,
+    #[serde(default = "default_fx_preset")]
+    pub fx_preset: String,
     pub repeat: RepeatMode,
     pub resume_enabled: bool,
     pub autoplay_next: bool,
@@ -299,8 +323,22 @@ pub struct Settings {
     pub remember_window: bool,
     pub window_width: f64,
     pub window_height: f64,
+    /// Keyboard seek step in seconds (←/→ and J/L).
+    #[serde(default = "default_seek_step_secs")]
+    pub seek_step_secs: f64,
     pub recent: Vec<MediaItem>,
     pub resume_positions: Vec<ResumeEntry>,
+}
+
+fn default_seek_step_secs() -> f64 {
+    5.0
+}
+
+fn default_fx_enabled() -> bool {
+    true
+}
+fn default_fx_preset() -> String {
+    "Flat".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
@@ -319,6 +357,8 @@ impl Default for Settings {
             volume: 100.0,
             muted: false,
             speed: 1.0,
+            fx_enabled: default_fx_enabled(),
+            fx_preset: default_fx_preset(),
             repeat: RepeatMode::Off,
             resume_enabled: true,
             autoplay_next: true,
@@ -327,6 +367,7 @@ impl Default for Settings {
             remember_window: true,
             window_width: 1100.0,
             window_height: 700.0,
+            seek_step_secs: default_seek_step_secs(),
             recent: Vec::new(),
             resume_positions: Vec::new(),
         }
@@ -340,11 +381,11 @@ impl PlayerCommand {
             | Self::Play { request_id }
             | Self::Pause { request_id }
             | Self::TogglePause { request_id }
-            | Self::Stop { request_id }
             | Self::Seek { request_id, .. }
             | Self::SetVolume { request_id, .. }
             | Self::SetMuted { request_id, .. }
             | Self::SetSpeed { request_id, .. }
+            | Self::SetAudioFx { request_id, .. }
             | Self::SetFullscreen { request_id, .. }
             | Self::SetHostBounds { request_id, .. }
             | Self::Next { request_id }
@@ -393,7 +434,23 @@ pub fn validate_local_path(raw: &str) -> Result<String, AppError> {
             true,
         ));
     }
-    Ok(canonical.to_string_lossy().into_owned())
+    // Spaces are fine; strip Windows `\\?\` extended prefixes that confuse FFmpeg/libmpv.
+    Ok(path_for_mpv(canonical))
+}
+
+/// Convert a canonical OS path into a form libmpv/FFmpeg accept reliably.
+pub fn path_for_mpv(canonical: std::path::PathBuf) -> String {
+    let s = canonical.to_string_lossy().into_owned();
+    #[cfg(windows)]
+    {
+        if let Some(rest) = s.strip_prefix(r"\\?\") {
+            if let Some(unc) = rest.strip_prefix(r"UNC\") {
+                return format!(r"\\{unc}");
+            }
+            return rest.to_string();
+        }
+    }
+    s
 }
 
 pub fn display_name_for(path: &str) -> String {
@@ -431,5 +488,14 @@ mod tests {
     #[test]
     fn redacts_path() {
         assert_eq!(redact_path(r"C:\Users\me\video.mp4"), "…/video.mp4");
+    }
+
+    #[test]
+    fn strips_windows_extended_prefix() {
+        let p = std::path::PathBuf::from(r"\\?\C:\Users\me\My Video.mp4");
+        let out = path_for_mpv(p);
+        assert_eq!(out, r"C:\Users\me\My Video.mp4");
+        let unc = path_for_mpv(std::path::PathBuf::from(r"\\?\UNC\server\share\a.mp4"));
+        assert_eq!(unc, r"\\server\share\a.mp4");
     }
 }

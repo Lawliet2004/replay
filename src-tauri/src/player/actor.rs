@@ -1,7 +1,10 @@
 //! Single-owner player actor thread.
+//!
+//! Owns libmpv only. The platform video host HWND/view is created and resized on
+//! the UI thread; this actor receives an embed `wid` and never touches Win32
+//! window APIs (avoids HWND thread-affinity deadlocks).
 
 use crate::error::{AppError, ErrorCode};
-use crate::player::host::{create_host, VideoHost};
 use crate::player::model::{
     MediaMetadata, PlayerCommand, PlayerEvent, PlayerPhase, PlayerSnapshot, SubtitleStyle, Track,
     TrackKind, POSITION_SAMPLE_HZ,
@@ -20,20 +23,13 @@ pub struct PlayerHandle {
 }
 
 impl PlayerHandle {
-    pub fn spawn(
-        event_tx: Sender<PlayerEvent>,
-        app_data: PathBuf,
-        parent_wid: i64,
-        width: u32,
-        height: u32,
-    ) -> Self {
+    pub fn spawn(event_tx: Sender<PlayerEvent>, app_data: PathBuf, embed_wid: i64) -> Self {
         let (cmd_tx, cmd_rx) = mpsc::channel();
         let join = thread::Builder::new()
             .name("replay-player".into())
             .spawn(move || {
-                let mut actor =
-                    match PlayerActor::new(event_tx.clone(), app_data, parent_wid, width, height) {
-                        Ok(a) => a,
+                let mut actor = match PlayerActor::new(event_tx.clone(), app_data, embed_wid) {
+                    Ok(a) => a,
                     Err(err) => {
                         let snap = PlayerSnapshot {
                             phase: PlayerPhase::Error,
@@ -48,7 +44,7 @@ impl PlayerHandle {
                         drain_until_shutdown(cmd_rx, event_tx);
                         return;
                     }
-                    };
+                };
                 actor.run(cmd_rx);
             })
             .expect("spawn player actor");
@@ -83,11 +79,12 @@ fn drain_until_shutdown(rx: Receiver<PlayerCommand>, tx: Sender<PlayerEvent>) {
 struct PlayerActor {
     event_tx: Sender<PlayerEvent>,
     mpv: Mpv,
-    host: Box<dyn VideoHost>,
     playlist: Playlist,
     settings: SettingsStore,
     snapshot: PlayerSnapshot,
     last_position_emit: Instant,
+    settings_dirty: bool,
+    last_settings_save: Instant,
     hw_retried: bool,
 }
 
@@ -95,14 +92,14 @@ impl PlayerActor {
     fn new(
         event_tx: Sender<PlayerEvent>,
         app_data: PathBuf,
-        parent_wid: i64,
-        width: u32,
-        height: u32,
+        embed_wid: i64,
     ) -> Result<Self, AppError> {
         let settings = SettingsStore::load(&app_data);
-        let host = create_host(parent_wid, width, height)?;
-        let mpv = Mpv::new()?;
-        mpv.set_wid(host.handle().wid)?;
+        if embed_wid == 0 {
+            tracing::warn!("embed wid is 0; video host may be unavailable");
+        }
+        // wid must be applied before initialize so the first VO targets our HWND.
+        let mpv = Mpv::new_with_wid(embed_wid)?;
         mpv.observe_core_props()?;
         if !settings.get().hardware_decode {
             mpv.retry_software_decode()?;
@@ -121,40 +118,72 @@ impl PlayerActor {
         mpv.set_volume(snapshot.volume)?;
         mpv.set_mute(snapshot.muted)?;
         mpv.set_speed(snapshot.speed)?;
+        mpv.set_audio_fx(settings.get().fx_enabled, &settings.get().fx_preset)?;
         apply_sub_style(&mpv, &snapshot.subtitle_style)?;
 
         Ok(Self {
             event_tx,
             mpv,
-            host,
             playlist,
             settings,
             snapshot,
             last_position_emit: Instant::now() - Duration::from_secs(1),
+            settings_dirty: false,
+            last_settings_save: Instant::now(),
             hw_retried: false,
         })
     }
 
     fn run(&mut self, cmd_rx: Receiver<PlayerCommand>) {
-        let tick = Duration::from_millis(25);
+        let tick = Duration::from_millis(8);
         loop {
             loop {
                 match cmd_rx.try_recv() {
                     Ok(cmd) => self.handle_command(cmd),
                     Err(TryRecvError::Empty) => break,
-                    Err(TryRecvError::Disconnected) => return,
+                    Err(TryRecvError::Disconnected) => {
+                        self.flush_settings();
+                        return;
+                    }
                 }
             }
 
-            match self.mpv.wait_event(0.0) {
-                MpvClientEvent::None => {}
-                MpvClientEvent::Shutdown => return,
-                ev => self.handle_mpv_event(ev),
+            // Drain mpv events so FileLoaded / property storms don't backlog.
+            for _ in 0..64 {
+                match self.mpv.wait_event(0.0) {
+                    MpvClientEvent::None => break,
+                    MpvClientEvent::Shutdown => {
+                        self.flush_settings();
+                        return;
+                    }
+                    ev => self.handle_mpv_event(ev),
+                }
             }
 
             self.sample_position_if_due();
+            self.maybe_flush_settings();
             thread::sleep(tick);
         }
+    }
+
+    fn mark_settings_dirty(&mut self) {
+        self.settings_dirty = true;
+    }
+
+    fn maybe_flush_settings(&mut self) {
+        if self.settings_dirty && self.last_settings_save.elapsed() >= Duration::from_millis(400) {
+            self.flush_settings();
+        }
+    }
+
+    fn flush_settings(&mut self) {
+        if !self.settings_dirty {
+            return;
+        }
+        // Persist off the hot path so open/seek never wait on disk sync.
+        self.settings.save_async();
+        self.settings_dirty = false;
+        self.last_settings_save = Instant::now();
     }
 
     fn bump(&mut self) {
@@ -229,13 +258,6 @@ impl PlayerActor {
                     PlayerPhase::Paused
                 });
             }
-            PlayerCommand::Stop { .. } => {
-                self.persist_resume();
-                self.mpv.stop()?;
-                self.snapshot.position_secs = 0.0;
-                self.snapshot.eof_reached = false;
-                self.set_phase(PlayerPhase::Idle);
-            }
             PlayerCommand::Seek {
                 position_secs,
                 absolute,
@@ -254,14 +276,14 @@ impl PlayerActor {
                 self.mpv.set_volume(volume)?;
                 self.snapshot.volume = volume;
                 self.settings.get_mut().volume = volume;
-                let _ = self.settings.save();
+                self.mark_settings_dirty();
                 self.emit_snapshot();
             }
             PlayerCommand::SetMuted { muted, .. } => {
                 self.mpv.set_mute(muted)?;
                 self.snapshot.muted = muted;
                 self.settings.get_mut().muted = muted;
-                let _ = self.settings.save();
+                self.mark_settings_dirty();
                 self.emit_snapshot();
             }
             PlayerCommand::SetSpeed { speed, .. } => {
@@ -269,16 +291,23 @@ impl PlayerActor {
                 self.mpv.set_speed(speed)?;
                 self.snapshot.speed = speed;
                 self.settings.get_mut().speed = speed;
-                let _ = self.settings.save();
+                self.mark_settings_dirty();
                 self.emit_snapshot();
+            }
+            PlayerCommand::SetAudioFx {
+                enabled, preset, ..
+            } => {
+                self.mpv.set_audio_fx(enabled, &preset)?;
+                self.settings.get_mut().fx_enabled = enabled;
+                self.settings.get_mut().fx_preset = preset;
+                self.mark_settings_dirty();
             }
             PlayerCommand::SetFullscreen { fullscreen, .. } => {
                 self.snapshot.fullscreen = fullscreen;
-                let _ = self.host.set_visible(true);
                 self.emit_snapshot();
             }
-            PlayerCommand::SetHostBounds { width, height, .. } => {
-                self.resize(width, height);
+            PlayerCommand::SetHostBounds { .. } => {
+                // Host HWND is resized on the UI thread; ignore here.
             }
             PlayerCommand::Next { .. } => {
                 self.persist_resume();
@@ -299,7 +328,7 @@ impl PlayerActor {
             PlayerCommand::SetRepeat { mode, .. } => {
                 self.playlist.set_repeat(mode);
                 self.settings.get_mut().repeat = mode;
-                let _ = self.settings.save();
+                self.mark_settings_dirty();
                 self.emit_snapshot();
             }
             PlayerCommand::SelectTrack { kind, track_id, .. } => match kind {
@@ -329,7 +358,7 @@ impl PlayerActor {
                 apply_sub_style(&self.mpv, &style)?;
                 self.snapshot.subtitle_style = style.clone();
                 self.settings.get_mut().subtitle_style = style;
-                let _ = self.settings.save();
+                self.mark_settings_dirty();
                 self.emit_snapshot();
             }
             PlayerCommand::ClearPlaylist { .. } => {
@@ -374,7 +403,8 @@ impl PlayerActor {
                 self.settings.remember_opened(&canon);
             }
         }
-        let _ = self.settings.save();
+        self.mark_settings_dirty();
+        // Flush recent list soon, but don't block loadfile on disk I/O.
         self.load_current(&item.path)
     }
 
@@ -387,6 +417,7 @@ impl PlayerActor {
         self.snapshot.subtitle_tracks.clear();
         self.hw_retried = false;
         self.set_phase(PlayerPhase::Loading);
+        tracing::info!(path = %crate::player::model::redact_path(path), "loadfile");
         self.mpv.loadfile(path)?;
         if let Some(pos) = self.settings.resume_for(path) {
             // Seek after file-loaded event; stash for then.
@@ -454,12 +485,16 @@ impl PlayerActor {
             }
             MpvClientEvent::Seek => self.set_phase(PlayerPhase::Seeking),
             MpvClientEvent::PlaybackRestart => {
-                let paused = self.mpv.get_flag("pause").unwrap_or(false);
-                self.set_phase(if paused {
-                    PlayerPhase::Paused
-                } else {
-                    PlayerPhase::Playing
-                });
+                // Never promote Idle → Playing/Paused without a loaded item
+                // (mpv can fire restart/pause observes during engine init).
+                if self.snapshot.current.is_some() {
+                    let paused = self.mpv.get_flag("pause").unwrap_or(false);
+                    self.set_phase(if paused {
+                        PlayerPhase::Paused
+                    } else {
+                        PlayerPhase::Playing
+                    });
+                }
             }
             MpvClientEvent::PropertyChange { name } => {
                 if name == "track-list" {
@@ -467,7 +502,8 @@ impl PlayerActor {
                     self.emit_snapshot();
                 } else if name == "pause" {
                     if let Ok(paused) = self.mpv.get_flag("pause") {
-                        if self.snapshot.phase != PlayerPhase::Seeking
+                        if self.snapshot.current.is_some()
+                            && self.snapshot.phase != PlayerPhase::Seeking
                             && self.snapshot.phase != PlayerPhase::Loading
                         {
                             self.set_phase(if paused {
@@ -490,6 +526,9 @@ impl PlayerActor {
     fn sample_position_if_due(&mut self) {
         let min_interval = Duration::from_secs_f64(1.0 / POSITION_SAMPLE_HZ);
         if self.last_position_emit.elapsed() < min_interval {
+            return;
+        }
+        if self.snapshot.current.is_none() {
             return;
         }
         if !matches!(
@@ -522,14 +561,11 @@ impl PlayerActor {
     }
 
     fn refresh_tracks(&mut self) {
-        // Prefer parsing track-list/N properties via simple enumeration.
         let mut audio = Vec::new();
         let mut subs = Vec::new();
-        if let Ok(Some(raw)) = self.mpv.get_string("track-list") {
-            // mpv returns JSON-ish when requested as string in some builds; fall back to count.
-            let _ = raw;
-        }
         let count = self.mpv.get_double("track-list/count").unwrap_or(0.0) as i64;
+        // Cap property storm on pathological files.
+        let count = count.clamp(0, 64);
         for i in 0..count {
             let prefix = format!("track-list/{i}");
             let typ = self
@@ -610,19 +646,15 @@ impl PlayerActor {
         if let Some(cur) = self.playlist.current().cloned() {
             self.settings
                 .set_resume(&cur.path, self.snapshot.position_secs);
-            let _ = self.settings.save();
+            self.mark_settings_dirty();
         }
     }
 
     fn persist_resume_clear(&mut self) {
         if let Some(cur) = self.playlist.current().cloned() {
             self.settings.set_resume(&cur.path, 0.0);
-            let _ = self.settings.save();
+            self.mark_settings_dirty();
         }
-    }
-
-    pub fn resize(&mut self, w: u32, h: u32) {
-        let _ = self.host.set_bounds(0, 0, w, h);
     }
 }
 

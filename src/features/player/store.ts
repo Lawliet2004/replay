@@ -64,9 +64,13 @@ export async function startPlayerStore(): Promise<void> {
     lastAcceptedGeneration = snapshot.loadGeneration;
     emit();
   } catch {
-    // backend may still be starting
+    /* ignore */
   }
-  await listenPlayerEvents(applyEvent);
+  try {
+    await listenPlayerEvents(applyEvent);
+  } catch {
+    /* ignore */
+  }
 }
 
 function subscribe(listener: Listener): () => void {

@@ -14,23 +14,23 @@ export function Timeline() {
     if (!dragging) {
       lastSample.current = snap.positionSecs;
       sampleAt.current = performance.now();
+      setDisplay(snap.positionSecs);
     }
   }, [snap.positionSecs, snap.revision, dragging]);
 
   useEffect(() => {
+    if (dragging || snap.phase !== "playing") return;
     let raf = 0;
     const loop = () => {
-      if (!dragging) {
-        setDisplay(
-          interpolatePosition(
-            lastSample.current,
-            sampleAt.current,
-            snap.phase,
-            performance.now(),
-            snap.speed,
-          ),
-        );
-      }
+      setDisplay(
+        interpolatePosition(
+          lastSample.current,
+          sampleAt.current,
+          snap.phase,
+          performance.now(),
+          snap.speed,
+        ),
+      );
       raf = requestAnimationFrame(loop);
     };
     raf = requestAnimationFrame(loop);

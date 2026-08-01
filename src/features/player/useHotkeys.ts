@@ -1,6 +1,13 @@
-import { useEffect } from "react";
-import { getCurrentWindow } from "@tauri-apps/api/window";
+import { useEffect, useRef } from "react";
+import { getSettings } from "../../lib/ipc";
 import { dispatch, usePlayerSnapshot } from "./store";
+import { togglePlayerFullscreen } from "./fullscreen";
+import {
+  getSeekStepSecs,
+  seekHoldMultiplier,
+  setSeekStepSecs,
+  subscribeSeekStep,
+} from "./seekPrefs";
 
 export function usePlayerHotkeys(opts: {
   onHelp: () => void;
@@ -8,63 +15,102 @@ export function usePlayerHotkeys(opts: {
   onEscape: () => void;
 }) {
   const snap = usePlayerSnapshot();
+  const snapRef = useRef(snap);
+  snapRef.current = snap;
+  const optsRef = useRef(opts);
+  optsRef.current = opts;
+  const arrowHoldStarted = useRef<Partial<Record<"arrowleft" | "arrowright", number>>>({});
 
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
+    void getSettings()
+      .then((s) => setSeekStepSecs(s.seekStepSecs))
+      .catch(() => {});
+    return subscribeSeekStep(() => {});
+  }, []);
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement | null)?.tagName;
       if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
 
       const key = e.key.toLowerCase();
+      const o = optsRef.current;
+      const s = snapRef.current;
+
       if (key === "?" || (e.shiftKey && key === "/")) {
         e.preventDefault();
-        opts.onHelp();
+        o.onHelp();
         return;
       }
       if (key === "escape") {
-        opts.onEscape();
+        o.onEscape();
         return;
       }
       if (key === " " || key === "k") {
         e.preventDefault();
         void dispatch({ type: "toggle_pause" });
-      } else if (key === "j") {
-        void dispatch({ type: "seek", position_secs: -10, absolute: false });
-      } else if (key === "l") {
-        void dispatch({ type: "seek", position_secs: 10, absolute: false });
-      } else if (key === "arrowleft") {
-        void dispatch({ type: "seek", position_secs: -5, absolute: false });
-      } else if (key === "arrowright") {
-        void dispatch({ type: "seek", position_secs: 5, absolute: false });
-      } else if (key === "arrowup") {
+        return;
+      }
+
+      const step = getSeekStepSecs();
+
+      if (key === "j") {
+        void dispatch({ type: "seek", position_secs: -step, absolute: false });
+        return;
+      }
+      if (key === "l") {
+        void dispatch({ type: "seek", position_secs: step, absolute: false });
+        return;
+      }
+      if (key === "arrowleft" || key === "arrowright") {
         e.preventDefault();
-        void dispatch({ type: "set_volume", volume: Math.min(100, snap.volume + 5) });
+        const dir = key === "arrowleft" ? -1 : 1;
+        const now = performance.now();
+        if (!e.repeat || arrowHoldStarted.current[key] == null) {
+          arrowHoldStarted.current[key] = now;
+        }
+        const heldMs = now - (arrowHoldStarted.current[key] ?? now);
+        const mult = seekHoldMultiplier(heldMs);
+        const delta = dir * step * mult;
+        void dispatch({ type: "seek", position_secs: delta, absolute: false });
+        return;
+      }
+      if (key === "arrowup") {
+        e.preventDefault();
+        void dispatch({ type: "set_volume", volume: Math.min(100, s.volume + 5) });
       } else if (key === "arrowdown") {
         e.preventDefault();
-        void dispatch({ type: "set_volume", volume: Math.max(0, snap.volume - 5) });
+        void dispatch({ type: "set_volume", volume: Math.max(0, s.volume - 5) });
       } else if (key === "m") {
-        void dispatch({ type: "set_muted", muted: !snap.muted });
+        void dispatch({ type: "set_muted", muted: !s.muted });
       } else if (key === "f") {
-        void (async () => {
-          const win = getCurrentWindow();
-          const next = !snap.fullscreen;
-          await win.setFullscreen(next);
-          await dispatch({ type: "set_fullscreen", fullscreen: next });
-        })();
+        e.preventDefault();
+        void togglePlayerFullscreen(s.fullscreen);
       } else if (key === "n") {
         void dispatch({ type: "next" });
       } else if (key === "p") {
         void dispatch({ type: "previous" });
       } else if (key === "o") {
-        opts.onOpen();
-      } else if (key === "s") {
-        void dispatch({ type: "stop" });
+        o.onOpen();
       } else if (key === ",") {
         void dispatch({ type: "seek", position_secs: -0.04, absolute: false });
       } else if (key === ".") {
         void dispatch({ type: "seek", position_secs: 0.04, absolute: false });
       }
     };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [opts, snap.fullscreen, snap.muted, snap.volume]);
+
+    const onKeyUp = (e: KeyboardEvent) => {
+      const key = e.key.toLowerCase();
+      if (key === "arrowleft" || key === "arrowright") {
+        delete arrowHoldStarted.current[key];
+      }
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("keyup", onKeyUp);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("keyup", onKeyUp);
+    };
+  }, []);
 }
