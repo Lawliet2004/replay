@@ -2,8 +2,16 @@ import { describe, expect, it } from "vitest";
 import {
   CHROME_HIDE_MS,
   CHROME_RESERVE_PX,
+  circularCutoutFromRect,
   cutoutFromRect,
+  FULLSCREEN_CLOSE_CUTOUT_PAD_PX,
+  FULLSCREEN_CLOSE_SLOT_TOP_PX,
+  FULLSCREEN_CLOSE_TOP_PX,
+  FULLSCREEN_CLOSE_ZONE_PX,
+  hostPunchesOverlayHoles,
+  isInFullscreenCloseZone,
   NO_CUTOUT,
+  padRect,
   shouldKeepChromeVisible,
   videoHostHeight,
 } from "./chromeAutoHide";
@@ -11,10 +19,10 @@ import { seekHoldMultiplier, normalizeSeekStep } from "./seekPrefs";
 
 describe("chrome auto-hide policy", () => {
   it("uses a short hide delay constant", () => {
-    expect(CHROME_HIDE_MS).toBe(1200);
+    expect(CHROME_HIDE_MS).toBe(1000);
   });
 
-  it("allows hide when paused (spacebar must not pin chrome)", () => {
+  it("allows hide while paused with idle pointer", () => {
     expect(
       shouldKeepChromeVisible({
         hasMedia: true,
@@ -23,6 +31,25 @@ describe("chrome auto-hide policy", () => {
         phase: "paused",
       }),
     ).toBe(false);
+  });
+
+  it("pins chrome while loading or on error", () => {
+    expect(
+      shouldKeepChromeVisible({
+        hasMedia: true,
+        blockingUi: false,
+        hoveringChrome: false,
+        phase: "loading",
+      }),
+    ).toBe(true);
+    expect(
+      shouldKeepChromeVisible({
+        hasMedia: true,
+        blockingUi: false,
+        hoveringChrome: false,
+        phase: "error",
+      }),
+    ).toBe(true);
   });
 
   it("allows hide while playing with idle pointer", () => {
@@ -36,7 +63,7 @@ describe("chrome auto-hide policy", () => {
     ).toBe(false);
   });
 
-  it("keeps chrome while hovering controls", () => {
+  it("does not pin chrome for an idle pointer over the bars", () => {
     expect(
       shouldKeepChromeVisible({
         hasMedia: true,
@@ -44,7 +71,15 @@ describe("chrome auto-hide policy", () => {
         hoveringChrome: true,
         phase: "playing",
       }),
-    ).toBe(true);
+    ).toBe(false);
+    expect(
+      shouldKeepChromeVisible({
+        hasMedia: true,
+        blockingUi: false,
+        hoveringChrome: true,
+        phase: "paused",
+      }),
+    ).toBe(false);
   });
 
   it("keeps chrome when a drawer is open", () => {
@@ -56,6 +91,20 @@ describe("chrome auto-hide policy", () => {
         phase: "playing",
       }),
     ).toBe(true);
+  });
+});
+
+describe("fullscreen close zone", () => {
+  it("treats the top edge as the YouTube-style close reveal zone", () => {
+    expect(FULLSCREEN_CLOSE_ZONE_PX).toBe(88);
+    expect(isInFullscreenCloseZone(0)).toBe(true);
+    expect(isInFullscreenCloseZone(24)).toBe(true);
+    expect(isInFullscreenCloseZone(88)).toBe(true);
+    expect(isInFullscreenCloseZone(89)).toBe(false);
+    expect(isInFullscreenCloseZone(400)).toBe(false);
+    expect(isInFullscreenCloseZone(-1)).toBe(true);
+    expect(isInFullscreenCloseZone(-48)).toBe(true);
+    expect(isInFullscreenCloseZone(-49)).toBe(false);
   });
 });
 
@@ -111,9 +160,9 @@ describe("video host layout", () => {
   });
 });
 
-describe("overflow menu cutout", () => {
-  // The ⋯ panel hangs off the centred control bar, so at 1536 CSS px wide the
-  // panel is ~250 px inside the right edge — never at the window corner.
+describe("overlay menu cutout", () => {
+  // Settings hangs above the gear, so at 1536 CSS px wide the panel is inside
+  // the right edge — never assumed to be a window corner.
   it("maps the measured panel rect to physical client pixels", () => {
     expect(
       cutoutFromRect({ left: 1109, top: 560, right: 1285, bottom: 720 }, 1920, 1080, 1.25),
@@ -136,6 +185,59 @@ describe("overflow menu cutout", () => {
     expect(cutoutFromRect({ left: 0, top: 0, right: 0, bottom: 0 }, 1920, 1080, 1)).toEqual(
       NO_CUTOUT,
     );
+  });
+
+  it("pads a measured overlay rect outward", () => {
+    expect(padRect({ left: 10, top: 20, right: 110, bottom: 80 }, 6)).toEqual({
+      left: 4,
+      top: 14,
+      right: 116,
+      bottom: 86,
+    });
+    expect(padRect({ left: 20, top: 20, right: 60, bottom: 60 }, 2)).toEqual({
+      left: 18,
+      top: 18,
+      right: 62,
+      bottom: 62,
+    });
+    expect(padRect(null)).toBeNull();
+  });
+
+  it("snaps the fullscreen close chip to a square physical cutout", () => {
+    // Fractional CSS + 1.25 DPR would otherwise floor/ceil to a 1px-off rect
+    // that GDI draws as a squircle rather than a circle.
+    const hole = circularCutoutFromRect(
+      { left: 936.4, top: 24, right: 976.4, bottom: 64 },
+      1920,
+      1080,
+      1.25,
+      1,
+    );
+    expect(hole.w).toBe(hole.h);
+    expect(hole.w).toBeGreaterThan(0);
+    expect(circularCutoutFromRect(null, 1920, 1080, 1)).toEqual(NO_CUTOUT);
+  });
+
+  it("insets the close-chip hole so GDI clips inside the opaque disc", () => {
+    // 52×52 chip; default pad is -2 → 48×48 hole (Chrome disc; 2px gutter under video).
+    const rect = { left: 100, top: 43, right: 152, bottom: 95 };
+    const flush = circularCutoutFromRect(rect, 1920, 1080, 1, 0);
+    const inset = circularCutoutFromRect(rect, 1920, 1080, 1);
+    expect(FULLSCREEN_CLOSE_CUTOUT_PAD_PX).toBe(-2);
+    expect(FULLSCREEN_CLOSE_TOP_PX).toBe(45);
+    expect(FULLSCREEN_CLOSE_SLOT_TOP_PX).toBe(43);
+    expect(flush).toEqual({ x: 100, y: 43, w: 52, h: 52 });
+    expect(inset).toEqual({ x: 102, y: 45, w: 48, h: 48 });
+  });
+});
+
+describe("overlay hole support", () => {
+  it("treats Windows user agents as able to punch overlay holes", () => {
+    expect(hostPunchesOverlayHoles("Mozilla/5.0 (Windows NT 10.0; Win64; x64)")).toBe(true);
+    expect(hostPunchesOverlayHoles("Mozilla/5.0 (Windows NT 10.0; WOW64)")).toBe(true);
+    expect(hostPunchesOverlayHoles("Mozilla/5.0 (Windows NT 6.1; Win32)")).toBe(true);
+    expect(hostPunchesOverlayHoles("Mozilla/5.0 (X11; Linux x86_64)")).toBe(false);
+    expect(hostPunchesOverlayHoles("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)")).toBe(false);
   });
 });
 

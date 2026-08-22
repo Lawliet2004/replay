@@ -20,7 +20,7 @@ Set `REPLAY_LIBMPV_PATH` to override the libmpv DLL/shared library path.
 
 ## Linux notes
 
-Install `libmpv-dev` / `mpv` and X11 development packages. Enable `--features x11-host` for live X11 embedding. Use an X11 or XWayland session.
+Install `libmpv-dev` / `mpv` and X11 development packages (`libx11-dev`). Linux builds always link libX11. Use an X11 or XWayland session — native Wayland is not supported in v0.1. Deb packages depend on `libmpv2 | libmpv1` and `libx11-6`.
 
 ## macOS notes
 

@@ -64,7 +64,7 @@
         "bundleMediaFramework": false
       },
       "deb": {
-        "depends": []
+        "depends": ["libmpv2 | libmpv1", "libx11-6"]
       }
     },
     "macOS": {

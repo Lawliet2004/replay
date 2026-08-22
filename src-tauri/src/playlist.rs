@@ -40,22 +40,27 @@ impl Playlist {
 
     pub fn open_paths(&mut self, paths: &[String], replace: bool) -> Result<&MediaItem, AppError> {
         let mut validated = Vec::new();
+        let mut last_err: Option<AppError> = None;
         for p in paths {
-            let path = validate_local_path(p)?;
-            validated.push(MediaItem {
-                id: Uuid::new_v4().to_string(),
-                display_name: display_name_for(&path),
-                path,
-                duration_secs: None,
-                last_position_secs: None,
-            });
+            match validate_local_path(p) {
+                Ok(path) => validated.push(MediaItem {
+                    id: Uuid::new_v4().to_string(),
+                    display_name: display_name_for(&path),
+                    path,
+                    duration_secs: None,
+                    last_position_secs: None,
+                }),
+                Err(e) => last_err = Some(e),
+            }
         }
         if validated.is_empty() {
-            return Err(AppError::new(
-                ErrorCode::InvalidPath,
-                "No playable files were provided.",
-                true,
-            ));
+            return Err(last_err.unwrap_or_else(|| {
+                AppError::new(
+                    ErrorCode::InvalidPath,
+                    "No playable files were provided.",
+                    true,
+                )
+            }));
         }
         if replace {
             self.items = validated;
@@ -229,5 +234,36 @@ mod tests {
             .open_paths(&["https://example.com/a.mp4".into()], true)
             .unwrap_err();
         assert_eq!(err.code, ErrorCode::UrlRejected);
+    }
+
+    #[test]
+    fn skips_bad_paths_keeps_good() {
+        let a = NamedTempFile::new().unwrap();
+        let mut pl = Playlist::default();
+        pl.open_paths(
+            &[
+                "https://example.com/a.mp4".into(),
+                a.path().to_string_lossy().into_owned(),
+                "C:\\definitely\\missing\\nope.mp4".into(),
+            ],
+            true,
+        )
+        .unwrap();
+        assert_eq!(pl.items.len(), 1);
+        assert_eq!(pl.current_index, Some(0));
+    }
+
+    #[test]
+    fn append_keeps_current_index() {
+        let a = NamedTempFile::new().unwrap();
+        let b = NamedTempFile::new().unwrap();
+        let mut pl = Playlist::default();
+        pl.open_paths(&[a.path().to_string_lossy().into_owned()], true)
+            .unwrap();
+        assert_eq!(pl.current_index, Some(0));
+        pl.open_paths(&[b.path().to_string_lossy().into_owned()], false)
+            .unwrap();
+        assert_eq!(pl.items.len(), 2);
+        assert_eq!(pl.current_index, Some(0));
     }
 }

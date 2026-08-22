@@ -6,8 +6,8 @@
 
 use crate::error::{AppError, ErrorCode};
 use crate::player::model::{
-    MediaMetadata, PlayerCommand, PlayerEvent, PlayerPhase, PlayerSnapshot, SubtitleStyle, Track,
-    TrackKind, POSITION_SAMPLE_HZ,
+    MediaMetadata, PlayerCommand, PlayerEvent, PlayerPhase, PlayerSnapshot, Settings,
+    SubtitleStyle, Track, TrackKind, POSITION_SAMPLE_HZ,
 };
 use crate::player::mpv::{Mpv, MpvClientEvent};
 use crate::playlist::Playlist;
@@ -59,20 +59,29 @@ impl PlayerHandle {
     }
 }
 
+fn engine_unavailable_snapshot() -> PlayerSnapshot {
+    PlayerSnapshot {
+        phase: PlayerPhase::Error,
+        error: Some(AppError::new(
+            ErrorCode::EngineMissing,
+            "Playback engine unavailable.",
+            false,
+        )),
+        ..PlayerSnapshot::default()
+    }
+}
+
 fn drain_until_shutdown(rx: Receiver<PlayerCommand>, tx: Sender<PlayerEvent>) {
-    while let Ok(cmd) = rx.recv() {
-        if let PlayerCommand::GetSnapshot { .. } = cmd {
-            let snap = PlayerSnapshot {
-                phase: PlayerPhase::Error,
-                error: Some(AppError::new(
-                    ErrorCode::EngineMissing,
-                    "Playback engine unavailable.",
-                    false,
-                )),
-                ..PlayerSnapshot::default()
-            };
-            let _ = tx.send(PlayerEvent::Snapshot { snapshot: snap });
-        }
+    // Engine failed to start — every command must still produce an error so Open
+    // is not a silent no-op.
+    while let Ok(_cmd) = rx.recv() {
+        let snap = engine_unavailable_snapshot();
+        let err = snap.error.clone().expect("engine error");
+        let _ = tx.send(PlayerEvent::Error {
+            error: err,
+            snapshot: snap.clone(),
+        });
+        let _ = tx.send(PlayerEvent::Snapshot { snapshot: snap });
     }
 }
 
@@ -115,11 +124,28 @@ impl PlayerActor {
             playlist: playlist.snapshot(),
             ..PlayerSnapshot::default()
         };
-        mpv.set_volume(snapshot.volume)?;
-        mpv.set_mute(snapshot.muted)?;
-        mpv.set_speed(snapshot.speed)?;
-        mpv.set_audio_fx(settings.get().fx_enabled, &settings.get().fx_preset)?;
-        apply_sub_style(&mpv, &snapshot.subtitle_style)?;
+        // Optional prefs must not kill the whole actor if libmpv rejects them.
+        // A hard fail here used to leave the player dead so Open did nothing while
+        // the sticky banner still showed "libmpv command: invalid parameter".
+        if let Err(e) = mpv.set_volume(snapshot.volume) {
+            tracing::warn!(error = %e.message, "set_volume on init failed");
+        }
+        if let Err(e) = mpv.set_mute(snapshot.muted) {
+            tracing::warn!(error = %e.message, "set_mute on init failed");
+        }
+        if let Err(e) = mpv.set_speed(snapshot.speed) {
+            tracing::warn!(error = %e.message, "set_speed on init failed");
+        }
+        if let Err(e) = mpv.set_audio_fx(settings.get().fx_enabled, &settings.get().fx_preset) {
+            tracing::warn!(error = %e.message, "set_audio_fx on init failed");
+        }
+        if let Err(e) = apply_sub_style(&mpv, &snapshot.subtitle_style) {
+            tracing::warn!(error = %e.message, "apply_sub_style on init failed");
+        }
+
+        let _ = event_tx.send(PlayerEvent::Settings {
+            settings: settings.get().clone(),
+        });
 
         Ok(Self {
             event_tx,
@@ -135,7 +161,6 @@ impl PlayerActor {
     }
 
     fn run(&mut self, cmd_rx: Receiver<PlayerCommand>) {
-        let tick = Duration::from_millis(8);
         loop {
             loop {
                 match cmd_rx.try_recv() {
@@ -148,7 +173,17 @@ impl PlayerActor {
                 }
             }
 
-            // Drain mpv events so FileLoaded / property storms don't backlog.
+            // Block up to 50ms for an mpv event (replaces a 125 Hz sleep).
+            match self.mpv.wait_event(0.05) {
+                MpvClientEvent::None => {}
+                MpvClientEvent::Shutdown => {
+                    self.flush_settings();
+                    return;
+                }
+                ev => self.handle_mpv_event(ev),
+            }
+
+            // Drain remaining events so FileLoaded / property storms don't backlog.
             for _ in 0..64 {
                 match self.mpv.wait_event(0.0) {
                     MpvClientEvent::None => break,
@@ -162,7 +197,6 @@ impl PlayerActor {
 
             self.sample_position_if_due();
             self.maybe_flush_settings();
-            thread::sleep(tick);
         }
     }
 
@@ -219,9 +253,18 @@ impl PlayerActor {
         if let Err(err) = result {
             crate::diagnostics::log_error("player command", &err);
             self.snapshot.error = Some(err.clone());
+            // Fatal engine/host + failed open/load → Error phase (UI banner, host hide).
+            // Transient seek/volume/etc. keep the current phase and only set error.
             if matches!(
                 err.code,
-                ErrorCode::EngineMissing | ErrorCode::EngineInit | ErrorCode::RenderHost
+                ErrorCode::EngineMissing
+                    | ErrorCode::EngineInit
+                    | ErrorCode::RenderHost
+                    | ErrorCode::UnsupportedMedia
+                    | ErrorCode::CodecFailure
+                    | ErrorCode::FileNotFound
+                    | ErrorCode::InvalidPath
+                    | ErrorCode::UrlRejected
             ) {
                 self.snapshot.phase = PlayerPhase::Error;
             }
@@ -242,14 +285,23 @@ impl PlayerActor {
                 self.open_paths(paths, replace)?;
             }
             PlayerCommand::Play { .. } => {
+                if self.playlist.current().is_none() {
+                    return Ok(());
+                }
                 self.mpv.set_pause(false)?;
                 self.set_phase(PlayerPhase::Playing);
             }
             PlayerCommand::Pause { .. } => {
+                if self.playlist.current().is_none() {
+                    return Ok(());
+                }
                 self.mpv.set_pause(true)?;
                 self.set_phase(PlayerPhase::Paused);
             }
             PlayerCommand::TogglePause { .. } => {
+                if self.playlist.current().is_none() {
+                    return Ok(());
+                }
                 let paused = self.mpv.get_flag("pause").unwrap_or(true);
                 self.mpv.set_pause(!paused)?;
                 self.set_phase(if paused {
@@ -263,6 +315,9 @@ impl PlayerActor {
                 absolute,
                 ..
             } => {
+                if self.playlist.current().is_none() {
+                    return Ok(());
+                }
                 self.set_phase(PlayerPhase::Seeking);
                 let target = if absolute {
                     position_secs.max(0.0)
@@ -392,11 +447,58 @@ impl PlayerActor {
                 self.playlist.reorder(from, to)?;
                 self.emit_snapshot();
             }
+            PlayerCommand::ApplySettings { settings, .. } => {
+                self.apply_settings(settings)?;
+            }
         }
         Ok(())
     }
 
+    fn emit_settings(&self) {
+        let _ = self.event_tx.send(PlayerEvent::Settings {
+            settings: self.settings.get().clone(),
+        });
+    }
+
+    fn apply_settings(&mut self, incoming: Settings) -> Result<(), AppError> {
+        let mut next = incoming.normalized();
+        // Recents / resume positions are actor-owned; overlay prefs must not clobber them.
+        next.recent = self.settings.get().recent.clone();
+        next.resume_positions = self.settings.get().resume_positions.clone();
+
+        if let Err(e) = self.mpv.set_volume(next.volume) {
+            tracing::warn!(error = %e.message, "apply_settings volume failed");
+        }
+        if let Err(e) = self.mpv.set_mute(next.muted) {
+            tracing::warn!(error = %e.message, "apply_settings mute failed");
+        }
+        if let Err(e) = self.mpv.set_speed(next.speed) {
+            tracing::warn!(error = %e.message, "apply_settings speed failed");
+        }
+        if let Err(e) = self.mpv.set_audio_fx(next.fx_enabled, &next.fx_preset) {
+            tracing::warn!(error = %e.message, "apply_settings fx failed");
+        }
+        if let Err(e) = apply_sub_style(&self.mpv, &next.subtitle_style) {
+            tracing::warn!(error = %e.message, "apply_settings sub style failed");
+        }
+        if let Err(e) = self.mpv.set_hwdec(next.hardware_decode) {
+            tracing::warn!(error = %e.message, "apply_settings hwdec failed");
+        }
+
+        self.playlist.set_repeat(next.repeat);
+        self.snapshot.volume = next.volume;
+        self.snapshot.muted = next.muted;
+        self.snapshot.speed = next.speed;
+        self.snapshot.subtitle_style = next.subtitle_style.clone();
+        self.settings.replace(next);
+        self.mark_settings_dirty();
+        self.emit_settings();
+        self.emit_snapshot();
+        Ok(())
+    }
+
     fn open_paths(&mut self, paths: Vec<String>, replace: bool) -> Result<(), AppError> {
+        let had_current = self.playlist.current().is_some();
         let item = self.playlist.open_paths(&paths, replace)?.clone();
         for p in &paths {
             if let Ok(canon) = crate::player::model::validate_local_path(p) {
@@ -404,8 +506,14 @@ impl PlayerActor {
             }
         }
         self.mark_settings_dirty();
-        // Flush recent list soon, but don't block loadfile on disk I/O.
-        self.load_current(&item.path)
+        self.emit_settings();
+        // Append while something is already current: grow queue only.
+        if replace || !had_current {
+            self.load_current(&item.path)
+        } else {
+            self.emit_snapshot();
+            Ok(())
+        }
     }
 
     fn load_current(&mut self, path: &str) -> Result<(), AppError> {
@@ -671,5 +779,37 @@ trait SatSub {
 impl SatSub for f64 {
     fn saturating_sub_f64(self, other: f64) -> f64 {
         (self - other).max(0.0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::ErrorCode;
+
+    #[test]
+    fn drain_emits_error_for_open_paths() {
+        let (cmd_tx, cmd_rx) = mpsc::channel();
+        let (ev_tx, ev_rx) = mpsc::channel();
+        let worker = thread::spawn(move || drain_until_shutdown(cmd_rx, ev_tx));
+        cmd_tx
+            .send(PlayerCommand::OpenPaths {
+                request_id: "1".into(),
+                paths: vec!["a.mp4".into()],
+                replace: true,
+            })
+            .unwrap();
+        let ev = ev_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("drain must answer OpenPaths");
+        match ev {
+            PlayerEvent::Error { error, snapshot } => {
+                assert_eq!(error.code, ErrorCode::EngineMissing);
+                assert_eq!(snapshot.phase, PlayerPhase::Error);
+            }
+            other => panic!("expected Error, got {other:?}"),
+        }
+        drop(cmd_tx);
+        let _ = worker.join();
     }
 }

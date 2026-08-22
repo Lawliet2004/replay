@@ -11,6 +11,14 @@ pub struct HostHandle {
     pub wid: i64,
 }
 
+/// Native parent surface for libmpv `wid` embedding.
+#[derive(Debug, Clone, Copy)]
+pub struct ParentSurface {
+    pub wid: i64,
+    /// X11 `Display*` as integer; unused on Windows/macOS.
+    pub display: i64,
+}
+
 /// Regions to punch out of an opaque video host so HTML chrome stays visible.
 /// All values are physical pixels in host client coordinates; `0` = no cutout.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -60,28 +68,28 @@ pub use macos::MacosVideoHost;
 
 /// Create the platform-appropriate host attached to a parent native window id.
 pub fn create_host(
-    parent_wid: i64,
+    parent: ParentSurface,
     width: u32,
     height: u32,
 ) -> Result<Box<dyn VideoHost>, AppError> {
     #[cfg(windows)]
     {
-        let host = WindowsVideoHost::create(parent_wid as isize, width, height)?;
+        let host = WindowsVideoHost::create(parent.wid as isize, width, height)?;
         return Ok(Box::new(host));
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
-        let host = X11VideoHost::create(parent_wid as u64, width, height)?;
+        let host = X11VideoHost::create(parent.wid as u64, parent.display, width, height)?;
         return Ok(Box::new(host));
     }
     #[cfg(target_os = "macos")]
     {
-        let host = MacosVideoHost::create(parent_wid, width, height)?;
+        let host = MacosVideoHost::create(parent.wid, width, height)?;
         return Ok(Box::new(host));
     }
     #[allow(unreachable_code)]
     {
-        let _ = (parent_wid, width, height);
+        let _ = (parent, width, height);
         Err(AppError::new(
             ErrorCode::RenderHost,
             "Video host is not available on this platform.",

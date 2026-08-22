@@ -13,6 +13,7 @@ use std::sync::Arc;
 
 pub type MpvHandle = *mut c_void;
 
+const MPV_FORMAT_NONE: c_int = 0;
 const MPV_FORMAT_STRING: c_int = 1;
 const MPV_FORMAT_FLAG: c_int = 3;
 const MPV_FORMAT_INT64: c_int = 4;
@@ -112,6 +113,56 @@ impl Api {
     }
 }
 
+#[derive(Clone, Copy)]
+struct VoProfile {
+    vo: &'static str,
+    gpu_context: Option<&'static str>,
+}
+
+fn vo_profiles() -> &'static [VoProfile] {
+    #[cfg(windows)]
+    {
+        &[
+            VoProfile {
+                vo: "gpu",
+                gpu_context: Some("d3d11"),
+            },
+            VoProfile {
+                vo: "gpu-next",
+                gpu_context: Some("d3d11"),
+            },
+            VoProfile {
+                vo: "direct3d",
+                gpu_context: None,
+            },
+        ]
+    }
+    #[cfg(target_os = "linux")]
+    {
+        &[
+            VoProfile {
+                vo: "gpu",
+                gpu_context: None,
+            },
+            VoProfile {
+                vo: "gpu-next",
+                gpu_context: None,
+            },
+            VoProfile {
+                vo: "x11",
+                gpu_context: None,
+            },
+        ]
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
+    {
+        &[VoProfile {
+            vo: "gpu",
+            gpu_context: None,
+        }]
+    }
+}
+
 fn candidate_paths() -> Vec<PathBuf> {
     let mut paths = Vec::new();
     if let Ok(p) = std::env::var("REPLAY_LIBMPV_PATH") {
@@ -197,6 +248,32 @@ impl Mpv {
     /// **before** `mpv_initialize` so the VO targets our host from the first frame.
     pub fn new_with_wid(wid: i64) -> Result<Self, AppError> {
         let api = load_api()?;
+        let mut last = AppError::new(ErrorCode::EngineInit, "mpv_initialize failed.", false);
+        for profile in vo_profiles() {
+            match Self::try_init(api.clone(), wid, *profile) {
+                Ok(mpv) => {
+                    tracing::info!(
+                        vo = profile.vo,
+                        gpu_context = profile.gpu_context,
+                        "mpv initialized"
+                    );
+                    return Ok(mpv);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        vo = profile.vo,
+                        gpu_context = profile.gpu_context,
+                        error = %e.message,
+                        "mpv init profile failed"
+                    );
+                    last = e;
+                }
+            }
+        }
+        Err(last)
+    }
+
+    fn try_init(api: Arc<Api>, wid: i64, profile: VoProfile) -> Result<Self, AppError> {
         let handle = unsafe { (api.create)() };
         if handle.is_null() {
             return Err(AppError::new(
@@ -210,8 +287,12 @@ impl Mpv {
         if wid != 0 {
             mpv.set_int64("wid", wid)?;
         }
-        mpv.apply_safe_defaults()?;
-        mpv.check(unsafe { (mpv.api.initialize)(mpv.handle) }, "initialize")?;
+        mpv.apply_safe_defaults(profile)?;
+        mpv.check_code(
+            unsafe { (mpv.api.initialize)(mpv.handle) },
+            "initialize",
+            ErrorCode::EngineInit,
+        )?;
         // Re-assert after init in case a default VO touched windowing.
         if wid != 0 {
             let _ = mpv.set_int64("wid", wid);
@@ -219,12 +300,15 @@ impl Mpv {
         Ok(mpv)
     }
 
-    fn apply_safe_defaults(&self) -> Result<(), AppError> {
+    fn apply_safe_defaults(&self, profile: VoProfile) -> Result<(), AppError> {
         // Disable external config/scripts/default bindings/OSC/ytdl
         self.set_flag("config", false)?;
         self.set_flag("load-scripts", false)?;
         self.set_string("input-default-bindings", "no")?;
         self.set_string("input-vo-keyboard", "no")?;
+        // libmpv defaults this on for Windows; media keys would start/stop
+        // Replay while another application is focused.
+        self.set_string("input-media-keys", "no")?;
         self.set_string("osc", "no")?;
         self.set_string("ytdl", "no")?;
         self.set_string("hwdec", "auto-safe")?;
@@ -235,11 +319,9 @@ impl Mpv {
         self.set_string("msg-level", "all=warn")?;
         self.set_string("sub-auto", "fuzzy")?;
         self.set_string("audio-display", "no")?;
-        // Prefer embedded rendering into our host HWND/view.
-        self.set_string("vo", "gpu")?;
-        #[cfg(windows)]
-        {
-            let _ = self.set_string("gpu-context", "d3d11");
+        self.set_string("vo", profile.vo)?;
+        if let Some(ctx) = profile.gpu_context {
+            let _ = self.set_string("gpu-context", ctx);
         }
         Ok(())
     }
@@ -249,6 +331,10 @@ impl Mpv {
     }
 
     pub fn command(&self, args: &[&str]) -> Result<(), AppError> {
+        self.command_code(args, ErrorCode::Internal)
+    }
+
+    fn command_code(&self, args: &[&str], code: ErrorCode) -> Result<(), AppError> {
         let c_args: Vec<CString> = args
             .iter()
             .map(|s| {
@@ -258,14 +344,35 @@ impl Mpv {
             .collect::<Result<_, _>>()?;
         let mut ptrs: Vec<*const c_char> = c_args.iter().map(|s| s.as_ptr()).collect();
         ptrs.push(ptr::null());
-        self.check(
-            unsafe { (self.api.command)(self.handle, ptrs.as_ptr()) },
-            "command",
-        )
+        let ctx = args.first().copied().unwrap_or("command");
+        let status = unsafe { (self.api.command)(self.handle, ptrs.as_ptr()) };
+        if status < 0 {
+            // Include subcommand so logs show e.g. "loadfile" / "af", not bare "command".
+            let detail = if args.len() > 1 {
+                format!("{ctx} {}", args[1])
+            } else {
+                ctx.to_string()
+            };
+            return self.check_code(status, &detail, code);
+        }
+        Ok(())
     }
 
     pub fn loadfile(&self, path: &str) -> Result<(), AppError> {
-        self.command(&["loadfile", path, "replace"])
+        // Prefer forward slashes — some libmpv/FFmpeg builds choke on `\`.
+        #[cfg(windows)]
+        let path_owned = path.replace('\\', "/");
+        #[cfg(windows)]
+        let path = path_owned.as_str();
+        // Explicit replace flag (default) — two-arg form also works on this build.
+        match self.command_code(&["loadfile", path, "replace"], ErrorCode::UnsupportedMedia) {
+            Ok(()) => Ok(()),
+            Err(e) if e.message.contains("invalid parameter") => {
+                // Fallback for builds that reject the flags token via argv API.
+                self.command_code(&["loadfile", path], ErrorCode::UnsupportedMedia)
+            }
+            Err(e) => Err(e),
+        }
     }
 
     pub fn stop(&self) -> Result<(), AppError> {
@@ -293,12 +400,13 @@ impl Mpv {
     }
 
     /// Apply Replay's lightweight desktop FX chain inside libmpv.
-    /// The chain is intentionally conservative and uses libavfilter primitives
-    /// available in the bundled libmpv build; clearing it is a bit-transparent
-    /// bypass for desktop playback.
+    /// Uses the `af` property — the `af clr` command returns
+    /// MPV_ERROR_INVALID_PARAMETER on this libmpv build when no value arg is passed
+    /// (kills actor init and makes every subsequent open a no-op).
     pub fn set_audio_fx(&self, enabled: bool, preset: &str) -> Result<(), AppError> {
         if !enabled || preset.eq_ignore_ascii_case("flat") {
-            return self.command(&["af", "clr"]);
+            // Empty af property clears filters; never use `af clr` command.
+            return self.set_string("af", "");
         }
         let chain = match preset.to_ascii_lowercase().as_str() {
             "vocal" | "podcast" | "clear" => {
@@ -312,7 +420,7 @@ impl Mpv {
             }
             _ => "lavfi=[acompressor=threshold=-18dB:ratio=2:attack=10:release=100,alimiter=limit=0.9]",
         };
-        self.command(&["af", "set", chain])
+        self.set_string("af", chain)
     }
 
     pub fn set_sub_delay(&self, secs: f64) -> Result<(), AppError> {
@@ -346,24 +454,30 @@ impl Mpv {
     }
 
     pub fn observe_core_props(&self) -> Result<(), AppError> {
-        for (name, fmt) in [
-            ("time-pos", MPV_FORMAT_DOUBLE),
-            ("duration", MPV_FORMAT_DOUBLE),
-            ("pause", MPV_FORMAT_FLAG),
-            ("eof-reached", MPV_FORMAT_FLAG),
-            ("core-idle", MPV_FORMAT_FLAG),
-            ("seeking", MPV_FORMAT_FLAG),
-            ("volume", MPV_FORMAT_DOUBLE),
-            ("mute", MPV_FORMAT_FLAG),
-            ("speed", MPV_FORMAT_DOUBLE),
-            ("track-list", MPV_FORMAT_STRING),
-            ("media-title", MPV_FORMAT_STRING),
+        // MPV_FORMAT_NONE notifies without coercing the native type — observing
+        // track-list as STRING used to fail init on some libmpv builds.
+        for name in [
+            "time-pos",
+            "duration",
+            "pause",
+            "eof-reached",
+            "core-idle",
+            "seeking",
+            "volume",
+            "mute",
+            "speed",
+            "track-list",
+            "media-title",
         ] {
             let cname = CString::new(name).unwrap();
-            self.check(
-                unsafe { (self.api.observe_property)(self.handle, 0, cname.as_ptr(), fmt) },
+            if let Err(e) = self.check(
+                unsafe {
+                    (self.api.observe_property)(self.handle, 0, cname.as_ptr(), MPV_FORMAT_NONE)
+                },
                 "observe_property",
-            )?;
+            ) {
+                tracing::warn!(prop = name, error = %e.message, "observe_property failed");
+            }
         }
         Ok(())
     }
@@ -472,7 +586,11 @@ impl Mpv {
     }
 
     pub fn retry_software_decode(&self) -> Result<(), AppError> {
-        self.set_string("hwdec", "no")
+        self.set_hwdec(false)
+    }
+
+    pub fn set_hwdec(&self, enabled: bool) -> Result<(), AppError> {
+        self.set_string("hwdec", if enabled { "auto-safe" } else { "no" })
     }
 
     fn set_string(&self, name: &str, value: &str) -> Result<(), AppError> {
@@ -541,6 +659,10 @@ impl Mpv {
     }
 
     fn check(&self, status: c_int, ctx: &str) -> Result<(), AppError> {
+        self.check_code(status, ctx, ErrorCode::Internal)
+    }
+
+    fn check_code(&self, status: c_int, ctx: &str, code: ErrorCode) -> Result<(), AppError> {
         if status >= 0 {
             return Ok(());
         }
@@ -552,11 +674,7 @@ impl Mpv {
                 CStr::from_ptr(p).to_string_lossy().into_owned()
             }
         };
-        Err(AppError::new(
-            ErrorCode::EngineInit,
-            format!("libmpv {ctx}: {msg}"),
-            true,
-        ))
+        Err(AppError::new(code, format!("libmpv {ctx}: {msg}"), true))
     }
 }
 

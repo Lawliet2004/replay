@@ -45,7 +45,7 @@ windows = { version = "0.61", features = [
 ] }
 
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
-x11 = { version = "2", features = ["xlib"], optional = true }
+x11 = { version = "2", features = ["xlib"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
@@ -55,7 +55,8 @@ objc2-foundation = "0.3"
 [features]
 default = ["mpv"]
 mpv = []
-x11-host = ["x11"]
+# Kept for compatibility. Linux always links libX11 (see target deps).
+x11-host = []
 
 [dev-dependencies]
 tempfile = "3"

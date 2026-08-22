@@ -1,9 +1,12 @@
-import { useCallback, useEffect, useState, type MouseEvent } from "react";
+import { forwardRef, useCallback, useEffect, useState, type MouseEvent } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { ReplayLogo } from "../../assets/ReplayLogo";
 
 /** Custom transparent title bar — visible with chrome, never in fullscreen. */
-export function TitleBar({ visible }: { visible: boolean }) {
+export const TitleBar = forwardRef<
+  HTMLDivElement,
+  { visible: boolean; mediaTitle?: string | null }
+>(function TitleBar({ visible, mediaTitle }, ref) {
   const [maximized, setMaximized] = useState(false);
 
   useEffect(() => {
@@ -37,6 +40,7 @@ export function TitleBar({ visible }: { visible: boolean }) {
 
   return (
     <div
+      ref={ref}
       className={`titlebar ${visible ? "visible" : ""}`}
       onMouseDown={onDrag}
       role="banner"
@@ -47,6 +51,11 @@ export function TitleBar({ visible }: { visible: boolean }) {
           <ReplayLogo size={18} className="titlebar-logo" />
         </span>
         <span className="titlebar-name">Replay</span>
+        {mediaTitle ? (
+          <span className="titlebar-media" title={mediaTitle}>
+            {mediaTitle}
+          </span>
+        ) : null}
       </div>
       <div className="titlebar-spacer" />
       <div className="titlebar-controls" onMouseDown={(e) => e.stopPropagation()}>
@@ -109,4 +118,4 @@ export function TitleBar({ visible }: { visible: boolean }) {
       </div>
     </div>
   );
-}
+});

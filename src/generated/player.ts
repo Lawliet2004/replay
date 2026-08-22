@@ -129,6 +129,7 @@ export type PlayerCommand =
   | { type: "remove_playlist_item"; request_id: string; index: number }
   | { type: "play_index"; request_id: string; index: number }
   | { type: "reorder_playlist"; request_id: string; from: number; to: number }
+  | { type: "apply_settings"; request_id: string; settings: Settings }
   | { type: "get_snapshot"; request_id: string };
 
 export type PlayerEvent =
@@ -147,7 +148,8 @@ export type PlayerEvent =
       phase: PlayerPhase;
     }
   | { type: "error"; error: AppError; snapshot: PlayerSnapshot }
-  | { type: "ready"; load_generation: number };
+  | { type: "ready"; load_generation: number }
+  | { type: "settings"; settings: Settings };
 
 export interface ResumeEntry {
   path: string;

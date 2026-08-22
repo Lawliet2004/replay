@@ -14,7 +14,10 @@ export function usePlayerHotkeys(opts: {
   onOpen: () => void;
   onEscape: () => void;
 }) {
-  const snap = usePlayerSnapshot();
+  const snap = usePlayerSnapshot(
+    (s) => ({ volume: s.volume, muted: s.muted, fullscreen: s.fullscreen }),
+    (a, b) => a.volume === b.volume && a.muted === b.muted && a.fullscreen === b.fullscreen,
+  );
   const snapRef = useRef(snap);
   snapRef.current = snap;
   const optsRef = useRef(opts);

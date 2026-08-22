@@ -32,3 +32,26 @@ fn serde_roundtrip_snapshot() {
     let back: PlayerSnapshot = serde_json::from_str(&json).unwrap();
     assert_eq!(s, back);
 }
+
+#[test]
+fn apply_settings_roundtrip() {
+    let cmd = PlayerCommand::ApplySettings {
+        request_id: "x".into(),
+        settings: Settings::default(),
+    };
+    let json = serde_json::to_string(&cmd).unwrap();
+    assert!(json.contains("apply_settings"));
+    let back: PlayerCommand = serde_json::from_str(&json).unwrap();
+    assert_eq!(cmd, back);
+}
+
+#[test]
+fn settings_event_roundtrip() {
+    let ev = PlayerEvent::Settings {
+        settings: Settings::default(),
+    };
+    let json = serde_json::to_string(&ev).unwrap();
+    assert!(json.contains("settings"));
+    let back: PlayerEvent = serde_json::from_str(&json).unwrap();
+    assert_eq!(ev, back);
+}

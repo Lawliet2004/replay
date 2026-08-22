@@ -2,16 +2,6 @@
 import type { AppError } from "./AppError";
 import type { PlayerPhase } from "./PlayerPhase";
 import type { PlayerSnapshot } from "./PlayerSnapshot";
+import type { Settings } from "./Settings";
 
-export type PlayerEvent =
-  | { type: "snapshot"; snapshot: PlayerSnapshot }
-  | {
-      type: "position";
-      load_generation: bigint;
-      revision: bigint;
-      position_secs: number;
-      duration_secs: number;
-    }
-  | { type: "phase_changed"; load_generation: bigint; revision: bigint; phase: PlayerPhase }
-  | { type: "error"; error: AppError; snapshot: PlayerSnapshot }
-  | { type: "ready"; load_generation: bigint };
+export type PlayerEvent = { "type": "snapshot", snapshot: PlayerSnapshot, } | { "type": "position", load_generation: bigint, revision: bigint, position_secs: number, duration_secs: number, } | { "type": "phase_changed", load_generation: bigint, revision: bigint, phase: PlayerPhase, } | { "type": "error", error: AppError, snapshot: PlayerSnapshot, } | { "type": "ready", load_generation: bigint, } | { "type": "settings", settings: Settings, };

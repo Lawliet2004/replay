@@ -6,8 +6,8 @@ import {
 } from "./chromeAutoHide";
 
 /**
- * YouTube-like chrome: show on pointer activity, hide after CHROME_HIDE_MS while
- * media is up (unless hovering the bar or a menu is open).
+ * Windowed chrome: show on pointer activity, hide after CHROME_HIDE_MS while
+ * media is up (playing or paused) unless a blocking menu is open.
  */
 export function useChromeAutoHide(input: Omit<ChromeAutoHideInput, "hoveringChrome">) {
   const [visible, setVisible] = useState(true);

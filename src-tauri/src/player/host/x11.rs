@@ -4,7 +4,6 @@ use super::{HostHandle, VideoHost};
 use crate::error::{AppError, ErrorCode};
 use std::ptr;
 
-#[cfg(feature = "x11-host")]
 mod ffi {
     use std::os::raw::{c_char, c_int, c_uint, c_ulong, c_void};
     pub type Display = c_void;
@@ -12,7 +11,6 @@ mod ffi {
     #[link(name = "X11")]
     unsafe extern "C" {
         pub fn XOpenDisplay(name: *const c_char) -> *mut Display;
-        pub fn XDefaultRootWindow(display: *mut Display) -> Window;
         pub fn XCreateSimpleWindow(
             display: *mut Display,
             parent: Window,
@@ -37,123 +35,120 @@ mod ffi {
         pub fn XDestroyWindow(display: *mut Display, w: Window) -> c_int;
         pub fn XFlush(display: *mut Display) -> c_int;
         pub fn XCloseDisplay(display: *mut Display) -> c_int;
+        pub fn XRaiseWindow(display: *mut Display, w: Window) -> c_int;
     }
 }
 
 pub struct X11VideoHost {
-    #[cfg(feature = "x11-host")]
     display: *mut ffi::Display,
-    #[cfg(feature = "x11-host")]
     window: ffi::Window,
-    #[cfg(not(feature = "x11-host"))]
-    wid: i64,
+    /// True only if we opened this Display (must not close Tauri's connection).
+    owns_display: bool,
 }
 
-// Safety: X11 ops are confined to the player actor thread.
+// Safety: host methods run on the UI thread that owns the parent window.
 unsafe impl Send for X11VideoHost {}
 
 impl X11VideoHost {
-    pub fn create(parent: u64, width: u32, height: u32) -> Result<Self, AppError> {
-        #[cfg(feature = "x11-host")]
-        {
-            unsafe {
-                let display = ffi::XOpenDisplay(ptr::null());
-                if display.is_null() {
+    pub fn create(
+        parent: u64,
+        display_ptr: i64,
+        width: u32,
+        height: u32,
+    ) -> Result<Self, AppError> {
+        if parent == 0 {
+            return Err(AppError::new(
+                ErrorCode::RenderHost,
+                "Native Wayland is not supported in v0.1. Start Replay under X11 or XWayland.",
+                false,
+            ));
+        }
+        unsafe {
+            let (display, owns_display) = if display_ptr != 0 {
+                (display_ptr as *mut ffi::Display, false)
+            } else {
+                let opened = ffi::XOpenDisplay(ptr::null());
+                if opened.is_null() {
                     return Err(AppError::new(
                         ErrorCode::RenderHost,
-                        "XOpenDisplay failed. Native Wayland is not supported in v0.1; use X11/XWayland.",
+                        "XOpenDisplay failed. Start Replay under X11 or XWayland.",
                         false,
                     ));
                 }
-                let parent_win = if parent == 0 {
-                    ffi::XDefaultRootWindow(display)
-                } else {
-                    parent
-                };
-                let window = ffi::XCreateSimpleWindow(
-                    display,
-                    parent_win,
-                    0,
-                    0,
-                    width.max(1),
-                    height.max(1),
-                    0,
-                    0,
-                    0,
-                );
-                ffi::XMapWindow(display, window);
-                ffi::XFlush(display);
-                Ok(Self { display, window })
+                (opened, true)
+            };
+            let window = ffi::XCreateSimpleWindow(
+                display,
+                parent,
+                0,
+                0,
+                width.max(1),
+                height.max(1),
+                0,
+                0,
+                0,
+            );
+            if window == 0 {
+                if owns_display {
+                    ffi::XCloseDisplay(display);
+                }
+                return Err(AppError::new(
+                    ErrorCode::RenderHost,
+                    "XCreateSimpleWindow failed.",
+                    false,
+                ));
             }
-        }
-        #[cfg(not(feature = "x11-host"))]
-        {
-            let _ = (parent, width, height);
-            // Compile-gated stub keeps Linux builds green without X11 headers in CI.
-            Ok(Self { wid: parent as i64 })
+            // Above the opaque webview (same constraint as Win32 HWND_TOP).
+            // Chrome stays visible because commit_host_layout insets this window.
+            ffi::XFlush(display);
+            Ok(Self {
+                display,
+                window,
+                owns_display,
+            })
         }
     }
 }
 
 impl VideoHost for X11VideoHost {
     fn handle(&self) -> HostHandle {
-        #[cfg(feature = "x11-host")]
-        {
-            HostHandle {
-                wid: self.window as i64,
-            }
-        }
-        #[cfg(not(feature = "x11-host"))]
-        {
-            HostHandle { wid: self.wid }
+        HostHandle {
+            wid: self.window as i64,
         }
     }
 
     fn set_bounds(&mut self, x: i32, y: i32, w: u32, h: u32) -> Result<(), AppError> {
-        #[cfg(feature = "x11-host")]
-        {
-            unsafe {
-                ffi::XMoveResizeWindow(self.display, self.window, x, y, w.max(1), h.max(1));
-                ffi::XFlush(self.display);
-            }
-            Ok(())
+        unsafe {
+            ffi::XMoveResizeWindow(self.display, self.window, x, y, w.max(1), h.max(1));
+            ffi::XRaiseWindow(self.display, self.window);
+            ffi::XFlush(self.display);
         }
-        #[cfg(not(feature = "x11-host"))]
-        {
-            let _ = (x, y, w, h);
-            Ok(())
-        }
+        Ok(())
     }
 
     fn set_visible(&mut self, visible: bool) -> Result<(), AppError> {
-        #[cfg(feature = "x11-host")]
-        {
-            unsafe {
-                if visible {
-                    ffi::XMapWindow(self.display, self.window);
-                } else {
-                    ffi::XUnmapWindow(self.display, self.window);
-                }
-                ffi::XFlush(self.display);
+        unsafe {
+            if visible {
+                ffi::XMapWindow(self.display, self.window);
+                ffi::XRaiseWindow(self.display, self.window);
+            } else {
+                ffi::XUnmapWindow(self.display, self.window);
             }
-            Ok(())
+            ffi::XFlush(self.display);
         }
-        #[cfg(not(feature = "x11-host"))]
-        {
-            let _ = visible;
-            Ok(())
-        }
+        Ok(())
     }
 
     fn destroy(&mut self) {
-        #[cfg(feature = "x11-host")]
-        {
-            unsafe {
-                if !self.display.is_null() {
-                    ffi::XDestroyWindow(self.display, self.window);
+        unsafe {
+            if !self.display.is_null() {
+                ffi::XDestroyWindow(self.display, self.window);
+                if self.owns_display {
                     ffi::XCloseDisplay(self.display);
-                    self.display = ptr::null_mut();
+                } else {
+                    ffi::XFlush(self.display);
                 }
+                self.display = ptr::null_mut();
             }
         }
     }
@@ -162,5 +157,17 @@ impl VideoHost for X11VideoHost {
 impl Drop for X11VideoHost {
     fn drop(&mut self) {
         self.destroy();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::ErrorCode;
+
+    #[test]
+    fn zero_parent_is_render_host_error() {
+        let err = X11VideoHost::create(0, 0, 100, 100).unwrap_err();
+        assert_eq!(err.code, ErrorCode::RenderHost);
     }
 }

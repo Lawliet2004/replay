@@ -1,28 +1,36 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
-import { open } from "@tauri-apps/plugin-dialog";
 import { ReplayLogo } from "./assets/ReplayLogo";
-import { PlayerControls } from "./features/player/PlayerControls";
+import { pickMediaFiles } from "./lib/mediaPicker";
+import { FullscreenCloseButton, PlayerControls } from "./features/player/PlayerControls";
 import {
   PlaybackClickFeedback,
   type PlaybackClickFlash,
 } from "./features/player/PlaybackClickFeedback";
-import { HelpOverlay } from "./features/player/HelpOverlay";
 import { usePlayerHotkeys } from "./features/player/useHotkeys";
-import { MetadataDrawer } from "./features/player/MetadataDrawer";
 import { TitleBar } from "./features/player/TitleBar";
-import { dispatch, startPlayerStore, usePlayerSnapshot } from "./features/player/store";
-import { PlaylistDrawer } from "./features/playlist/PlaylistDrawer";
-import { SettingsDrawer } from "./features/settings/SettingsDrawer";
+import {
+  dispatch,
+  shallowEqual,
+  startPlayerStore,
+  usePlayerSnapshot,
+} from "./features/player/store";
+import { SettingsPopup, type SettingsView } from "./features/settings/SettingsPopup";
 import {
   CHROME_RESERVE_PX,
+  circularCutoutFromRect,
   cutoutFromRect,
-  DRAWER_RIGHT_RESERVE_PX,
+  FULLSCREEN_CLOSE_CUTOUT_PAD_PX,
+  FULLSCREEN_CLOSE_RESERVE_PX,
+  hostPunchesOverlayHoles,
   NO_CUTOUT,
+  OVERLAY_CUTOUT_PAD_PX,
+  padRect,
   TITLEBAR_RESERVE_PX,
 } from "./features/player/chromeAutoHide";
 import { useChromeAutoHide } from "./features/player/useChromeAutoHide";
+import { useFullscreenClose } from "./features/player/useFullscreenClose";
 import { setPlayerFullscreen } from "./features/player/fullscreen";
 import { getSettings } from "./lib/ipc";
 import { setSeekStepSecs } from "./features/player/seekPrefs";
@@ -33,7 +41,7 @@ function isSurfaceClickIgnored(target: EventTarget | null, chromeVisible: boolea
   if (!el) return true;
   if (
     el.closest(
-      ".titlebar, .drawer, .help-overlay, .more-menu, .empty-hero, .error-banner, .status-pill",
+      ".titlebar, .settings-popup, .empty-hero, .error-banner, .status-pill, .fullscreen-close",
     )
   ) {
     return true;
@@ -48,39 +56,43 @@ function isSurfaceClickIgnored(target: EventTarget | null, chromeVisible: boolea
 }
 
 export default function App() {
-  const snap = usePlayerSnapshot();
-  const [playlistOpen, setPlaylistOpen] = useState(false);
+  const snap = usePlayerSnapshot(
+    (s) => ({
+      current: s.current,
+      phase: s.phase,
+      fullscreen: s.fullscreen,
+      error: s.error,
+    }),
+    shallowEqual,
+  );
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [metaOpen, setMetaOpen] = useState(false);
-  const [helpOpen, setHelpOpen] = useState(false);
-  const [overflowOpen, setOverflowOpen] = useState(false);
+  const [settingsView, setSettingsView] = useState<SettingsView>("root");
+  const settingsViewRef = useRef<SettingsView>("root");
   const [clickFlash, setClickFlash] = useState<PlaybackClickFlash | null>(null);
 
   const hasMedia = Boolean(snap.current) && snap.phase !== "idle" && snap.phase !== "error";
-  const blockingUi = playlistOpen || settingsOpen || metaOpen || helpOpen;
-  const overlayOpen = blockingUi || overflowOpen;
+  const overlayOpen = settingsOpen;
 
   const { chromeVisible, bumpActivity, setHoveringChrome, forceHideUntilPointerLeave } =
     useChromeAutoHide({
       hasMedia,
-      blockingUi: overlayOpen,
+      blockingUi: overlayOpen && !snap.fullscreen,
       phase: snap.phase,
     });
+  const { closeVisible, setPointerY, setHoveringClose } = useFullscreenClose(snap.fullscreen);
 
   const dismissOverlays = useCallback(() => {
-    setHelpOpen(false);
     setSettingsOpen(false);
-    setPlaylistOpen(false);
-    setMetaOpen(false);
-    setOverflowOpen(false);
+    setSettingsView("root");
   }, []);
 
   const bumpRef = useRef(bumpActivity);
   bumpRef.current = bumpActivity;
-  const forceHideRef = useRef(forceHideUntilPointerLeave);
-  forceHideRef.current = forceHideUntilPointerLeave;
-  const wasFullscreen = useRef(false);
-  const overflowPanelRef = useRef<HTMLDivElement | null>(null);
+  const settingsPanelRef = useRef<HTMLDivElement | null>(null);
+  const titlebarRef = useRef<HTMLDivElement | null>(null);
+  const chromeRef = useRef<HTMLDivElement | null>(null);
+  const fsCloseRef = useRef<HTMLDivElement | null>(null);
+  const lastHostRef = useRef<string>("");
   const syncHostRef = useRef<() => void>(() => {});
   const chromeVisibleRef = useRef(chromeVisible);
   chromeVisibleRef.current = chromeVisible;
@@ -90,18 +102,33 @@ export default function App() {
   overlayOpenRef.current = overlayOpen;
   const dismissOverlaysRef = useRef(dismissOverlays);
   dismissOverlaysRef.current = dismissOverlays;
+  const fullscreenRef = useRef(snap.fullscreen);
+  fullscreenRef.current = snap.fullscreen;
+  const setPointerYRef = useRef(setPointerY);
+  setPointerYRef.current = setPointerY;
   const flashTokenRef = useRef(0);
 
-  // Help is a centered modal — hide the host so the dimmed card is fully visible.
-  // Drawers/overflow use localized cutouts so video keeps playing beside them.
-  const hostBlocked = helpOpen;
-  const drawerOpen = playlistOpen || settingsOpen || metaOpen;
+  // Loading: hide the HWND_TOP host so HTML banners are visible.
+  // Settings uses a measured overlay hole so video keeps playing around it.
+  const punchesOverlayHoles = hostPunchesOverlayHoles();
+  const hostBlocked = snap.phase === "loading";
   // Title bar: always when idle; with chrome when media; never in fullscreen.
   const titlebarVisible = !snap.fullscreen && (!hasMedia || chromeVisible);
-  const chromeBottomLogical = hasMedia && chromeVisible && !hostBlocked ? CHROME_RESERVE_PX : 0;
-  const chromeRightLogical = hasMedia && drawerOpen && !hostBlocked ? DRAWER_RIGHT_RESERVE_PX : 0;
-  const menuCutoutActive = hasMedia && overflowOpen && chromeVisible && !hostBlocked;
-  const chromeReserve = chromeBottomLogical;
+  const windowedChromeVisible = hasMedia && chromeVisible && !hostBlocked && !snap.fullscreen;
+  const fullscreenCloseReady = hasMedia && snap.fullscreen && !hostBlocked;
+  const chromeBottomLogical = windowedChromeVisible ? CHROME_RESERVE_PX : 0;
+  const chromeTopLogical =
+    titlebarVisible && hasMedia && !hostBlocked
+      ? TITLEBAR_RESERVE_PX
+      : fullscreenCloseReady && closeVisible && !punchesOverlayHoles
+        ? FULLSCREEN_CLOSE_RESERVE_PX
+        : 0;
+  const menuCutoutActive =
+    hasMedia &&
+    !hostBlocked &&
+    ((settingsOpen && !snap.fullscreen) ||
+      (snap.fullscreen && closeVisible && punchesOverlayHoles));
+  const chromeReserve = windowedChromeVisible ? CHROME_RESERVE_PX : 0;
   const titlebarReserve = titlebarVisible && hasMedia ? TITLEBAR_RESERVE_PX : 0;
 
   useEffect(() => {
@@ -135,42 +162,45 @@ export default function App() {
     };
   }, [snap.fullscreen]);
 
-  // Entering fullscreen: hide chrome immediately so the video goes full-bleed.
+  // Entering fullscreen: drop the windowed bars. The close chip waits for a
+  // top-edge pointer move (YouTube/Chrome). Exiting restores windowed chrome.
+  const prevFullscreenRef = useRef(snap.fullscreen);
   useEffect(() => {
-    if (snap.fullscreen && !wasFullscreen.current) {
-      forceHideRef.current();
+    const was = prevFullscreenRef.current;
+    prevFullscreenRef.current = snap.fullscreen;
+    if (snap.fullscreen === was) return;
+    if (snap.fullscreen) {
+      forceHideUntilPointerLeave();
+      dismissOverlays();
+    } else {
+      bumpRef.current();
     }
-    wasFullscreen.current = snap.fullscreen;
-  }, [snap.fullscreen]);
+  }, [snap.fullscreen, forceHideUntilPointerLeave, dismissOverlays]);
 
   const openFiles = useCallback(async () => {
-    const selected = await open({
-      multiple: true,
-      filters: [
-        {
-          name: "Media",
-          extensions: ["mp4", "mkv", "webm", "avi", "mov", "mp3", "flac", "opus", "wav", "m4a"],
-        },
-      ],
-    });
-    if (!selected) return;
-    const paths = Array.isArray(selected) ? selected : [selected];
+    const paths = await pickMediaFiles();
+    if (!paths?.length) return;
     await dispatch({ type: "open_paths", paths, replace: true });
   }, []);
 
   usePlayerHotkeys({
     onHelp: () => {
+      if (snap.fullscreen) return;
       bumpRef.current();
-      setHelpOpen((v) => !v);
+      if (settingsOpen && settingsViewRef.current === "shortcuts") {
+        settingsViewRef.current = "root";
+        setSettingsOpen(false);
+        setSettingsView("root");
+        return;
+      }
+      settingsViewRef.current = "shortcuts";
+      setSettingsView("shortcuts");
+      setSettingsOpen(true);
     },
     onOpen: () => void openFiles(),
     onEscape: () => {
-      if (helpOpen) setHelpOpen(false);
-      else if (settingsOpen) setSettingsOpen(false);
-      else if (playlistOpen) setPlaylistOpen(false);
-      else if (metaOpen) setMetaOpen(false);
-      else if (overflowOpen) setOverflowOpen(false);
-      else if (snap.fullscreen) {
+      if (settingsOpen) return;
+      if (snap.fullscreen) {
         void setPlayerFullscreen(false);
       }
     },
@@ -195,18 +225,53 @@ export default function App() {
       const dpr = window.devicePixelRatio || 1;
       const clientW = Math.max(1, Math.round(window.innerWidth * dpr));
       const clientH = Math.max(1, Math.round(window.innerHeight * dpr));
-      const chromeBottom = Math.round(chromeBottomLogical * dpr);
-      const chromeTop =
-        hasMedia && titlebarVisible && !hostBlocked ? Math.round(TITLEBAR_RESERVE_PX * dpr) : 0;
-      const chromeRight = Math.round(chromeRightLogical * dpr);
-      // The ⋯ panel is anchored to its button inside the centred control bar,
-      // so the hole must be measured rather than derived from window edges.
+      const measuredChrome = chromeRef.current?.getBoundingClientRect().height;
+      const measuredTitle = titlebarRef.current?.getBoundingClientRect().height;
+      const measuredClose = fsCloseRef.current?.getBoundingClientRect();
+      const chromeBottom =
+        chromeBottomLogical > 0
+          ? Math.round(
+              (measuredChrome && measuredChrome > 0 ? measuredChrome : CHROME_RESERVE_PX) * dpr,
+            )
+          : 0;
+      let chromeTop = 0;
+      if (chromeTopLogical > 0) {
+        if (snap.fullscreen) {
+          const logical =
+            measuredClose && measuredClose.height > 0
+              ? Math.max(FULLSCREEN_CLOSE_RESERVE_PX, measuredClose.bottom)
+              : FULLSCREEN_CLOSE_RESERVE_PX;
+          chromeTop = Math.round(logical * dpr);
+        } else {
+          chromeTop = Math.round(
+            (measuredTitle && measuredTitle > 0 ? measuredTitle : TITLEBAR_RESERVE_PX) * dpr,
+          );
+        }
+      }
+      const chromeRight = 0;
+      // Settings hangs above the gear; the fullscreen close chip is a
+      // free-floating hole. Both must be measured rather than derived from edges.
+      const overlayEl =
+        settingsOpen && !snap.fullscreen
+          ? settingsPanelRef.current
+          : snap.fullscreen && closeVisible
+            ? fsCloseRef.current
+            : null;
+      const overlayRect = overlayEl?.getBoundingClientRect();
       const menu = menuCutoutActive
-        ? cutoutFromRect(overflowPanelRef.current?.getBoundingClientRect(), clientW, clientH, dpr)
+        ? snap.fullscreen
+          ? circularCutoutFromRect(
+              overlayRect,
+              clientW,
+              clientH,
+              dpr,
+              FULLSCREEN_CLOSE_CUTOUT_PAD_PX,
+            )
+          : cutoutFromRect(padRect(overlayRect, OVERLAY_CUTOUT_PAD_PX), clientW, clientH, dpr)
         : NO_CUTOUT;
       const hideHost = !hasMedia || hostBlocked;
-      void dispatch({
-        type: "set_host_bounds",
+      const payload = {
+        type: "set_host_bounds" as const,
         width: clientW,
         height: hideHost ? 0 : clientH,
         chrome_bottom: chromeBottom,
@@ -216,7 +281,11 @@ export default function App() {
         menu_y: menu.y,
         menu_w: menu.w,
         menu_h: menu.h,
-      });
+      };
+      const key = JSON.stringify(payload);
+      if (key === lastHostRef.current) return;
+      lastHostRef.current = key;
+      void dispatch(payload);
     };
     const onResize = () => {
       cancelAnimationFrame(raf);
@@ -233,25 +302,39 @@ export default function App() {
     hasMedia,
     hostBlocked,
     chromeVisible,
+    closeVisible,
     chromeBottomLogical,
-    chromeRightLogical,
+    chromeTopLogical,
     menuCutoutActive,
     titlebarVisible,
-    overflowOpen,
-    drawerOpen,
+    settingsOpen,
     snap.current?.path,
     snap.fullscreen,
     snap.phase,
   ]);
 
-  // The panel resizes while open (the repeat item relabels), so track it.
+  // Chrome / title bar / settings popup resize (DPI, nested views) must re-cut the host.
   useEffect(() => {
-    const el = overflowPanelRef.current;
-    if (!menuCutoutActive || !el || typeof ResizeObserver === "undefined") return;
+    if (typeof ResizeObserver === "undefined") return;
     const observer = new ResizeObserver(() => syncHostRef.current());
-    observer.observe(el);
+    const nodes = [
+      chromeRef.current,
+      titlebarRef.current,
+      settingsPanelRef.current,
+      fsCloseRef.current,
+    ];
+    for (const el of nodes) {
+      if (el) observer.observe(el);
+    }
     return () => observer.disconnect();
-  }, [menuCutoutActive]);
+  }, [
+    menuCutoutActive,
+    settingsOpen,
+    chromeVisible,
+    closeVisible,
+    titlebarVisible,
+    snap.fullscreen,
+  ]);
 
   // Brief chrome reveal when a file first loads — not on pause/play.
   useEffect(() => {
@@ -261,8 +344,19 @@ export default function App() {
   // Native mouse hook drives reveal: the HWND_TOP video host swallows pointer
   // input, so window pointermove over the video is unreliable by design.
   // Surface clicks also arrive only via this hook (webview never sees them).
+  // The host already drops unfocused / other-window clicks so play/pause does
+  // not toggle when switching apps; do not re-gate on document.hasFocus() here
+  // (force-foreground runs before this event arrives).
   useEffect(() => {
-    const unActivity = listen("player://activity", () => {
+    type PointerPayload = { x: number; y: number; window_w: number; window_h: number };
+    const unActivity = listen<PointerPayload>("player://activity", (ev) => {
+      if (fullscreenRef.current) {
+        const { y, window_h } = ev.payload ?? {};
+        if (typeof y === "number" && typeof window_h === "number" && window_h > 0) {
+          setPointerYRef.current(y * (window.innerHeight / window_h));
+        }
+        return;
+      }
       bumpRef.current();
     });
 
@@ -300,13 +394,21 @@ export default function App() {
     };
   }, []);
 
-  // Stage-wide pointer motion reveals chrome (YouTube-like). Relies on video-host click-through.
+  // Windowed: any motion reveals chrome. Fullscreen: only the top edge shows close.
   useEffect(() => {
     if (!hasMedia) return;
-    const onMove = () => {
+    const onMove = (e: PointerEvent) => {
+      if (fullscreenRef.current) {
+        setPointerYRef.current(e.clientY);
+        return;
+      }
       bumpRef.current();
     };
-    const onDown = () => {
+    const onDown = (e: PointerEvent) => {
+      if (fullscreenRef.current) {
+        setPointerYRef.current(e.clientY);
+        return;
+      }
       bumpRef.current();
     };
     window.addEventListener("pointermove", onMove);
@@ -319,9 +421,9 @@ export default function App() {
 
   return (
     <div
-      className={`app ${snap.fullscreen ? "is-fullscreen" : ""} ${chromeVisible ? "show-chrome" : "hide-chrome"} ${
-        hasMedia ? "has-media" : ""
-      }`}
+      className={`app ${snap.fullscreen ? "is-fullscreen" : ""} ${
+        chromeVisible && !snap.fullscreen ? "show-chrome" : "hide-chrome"
+      } ${hasMedia ? "has-media" : ""}`}
       style={
         {
           ["--chrome-reserve" as string]: `${chromeReserve}px`,
@@ -332,7 +434,13 @@ export default function App() {
       <div className="video-stage" aria-hidden="true" />
       <PlaybackClickFeedback flash={clickFlash} />
 
-      <TitleBar visible={titlebarVisible} />
+      {!snap.fullscreen ? (
+        <TitleBar
+          ref={titlebarRef}
+          visible={titlebarVisible}
+          mediaTitle={snap.current?.displayName}
+        />
+      ) : null}
 
       {snap.phase === "idle" && !snap.current && (
         <div className="empty-hero">
@@ -364,45 +472,50 @@ export default function App() {
         </div>
       )}
 
-      <div
-        className={`chrome ${chromeVisible ? "visible" : ""}`}
-        onMouseEnter={() => {
-          setHoveringChrome(true);
-          bumpRef.current();
-        }}
-        onMouseLeave={() => setHoveringChrome(false)}
-      >
-        <PlayerControls
-          onOpenSettings={() => {
+      {!snap.fullscreen ? (
+        <div
+          ref={chromeRef}
+          className={`chrome ${chromeVisible ? "visible" : ""}`}
+          onMouseEnter={() => {
+            setHoveringChrome(true);
             bumpRef.current();
-            setOverflowOpen(false);
-            setSettingsOpen(true);
           }}
-          onOpenHelp={() => {
-            bumpRef.current();
-            setOverflowOpen(false);
-            setHelpOpen(true);
-          }}
-          onOpenMeta={() => {
-            bumpRef.current();
-            setOverflowOpen(false);
-            setMetaOpen(true);
-          }}
-          onOpenPlaylist={() => {
-            bumpRef.current();
-            setOverflowOpen(false);
-            setPlaylistOpen(true);
-          }}
-          overflowOpen={overflowOpen}
-          onOverflowOpenChange={setOverflowOpen}
-          overflowPanelRef={overflowPanelRef}
-        />
-      </div>
+          onMouseLeave={() => setHoveringChrome(false)}
+        >
+          <PlayerControls
+            settingsOpen={settingsOpen}
+            onToggleSettings={() => {
+              bumpRef.current();
+              setSettingsOpen((open) => {
+                if (open) return false;
+                setSettingsView("root");
+                return true;
+              });
+            }}
+          />
+        </div>
+      ) : null}
 
-      <PlaylistDrawer open={playlistOpen} onClose={() => setPlaylistOpen(false)} />
-      <SettingsDrawer open={settingsOpen} onClose={() => setSettingsOpen(false)} />
-      <MetadataDrawer open={metaOpen} onClose={() => setMetaOpen(false)} />
-      <HelpOverlay open={helpOpen} onClose={() => setHelpOpen(false)} />
+      {fullscreenCloseReady ? (
+        <FullscreenCloseButton
+          ref={fsCloseRef}
+          visible={closeVisible}
+          onHoverChange={setHoveringClose}
+        />
+      ) : null}
+
+      <SettingsPopup
+        open={settingsOpen && !snap.fullscreen}
+        initialView={settingsView}
+        onViewChange={(view) => {
+          settingsViewRef.current = view;
+        }}
+        onClose={() => {
+          setSettingsOpen(false);
+          setSettingsView("root");
+        }}
+        panelRef={settingsPanelRef}
+      />
     </div>
   );
 }

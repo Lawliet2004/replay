@@ -17,14 +17,14 @@ use crate::error::{AppError, ErrorCode};
 use serde::Serialize;
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
-use std::sync::atomic::{AtomicIsize, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicIsize, AtomicU32, AtomicU64, Ordering};
 use std::sync::OnceLock;
 use tauri::{AppHandle, Emitter};
 use windows::core::{BOOL, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    CombineRgn, CreateRectRgn, CreateRoundRectRgn, DeleteObject, GetStockObject, SetWindowRgn,
-    UpdateWindow, BLACK_BRUSH, HBRUSH, HRGN, RGN_DIFF,
+    CombineRgn, CreateEllipticRgn, CreateRectRgn, CreateRoundRectRgn, DeleteObject, GetStockObject,
+    SetWindowRgn, UpdateWindow, BLACK_BRUSH, HBRUSH, HRGN, RGN_DIFF,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
@@ -44,10 +44,13 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 const CLASS_NAME: &str = "ReplayMpvHost";
 const CLICK_THROUGH_TIMER: usize = 1;
+/// Re-apply click-through until libmpv's VO child appears, then stop.
+const CLICK_THROUGH_TICKS: u32 = 20;
 
 /// Minimum interval between `player://activity` emissions from the mouse hook.
 const ACTIVITY_EMIT_MS: u64 = 200;
 
+static CLICK_THROUGH_LEFT: AtomicU32 = AtomicU32::new(0);
 static ACTIVITY_HOOK: AtomicIsize = AtomicIsize::new(0);
 static ACTIVITY_PARENT: AtomicIsize = AtomicIsize::new(0);
 static ACTIVITY_APP: OnceLock<AppHandle> = OnceLock::new();
@@ -74,18 +77,28 @@ fn now_ms() -> u64 {
 ///
 /// The HWND_TOP video host is hit-test transparent / `WS_EX_NOACTIVATE`, so a
 /// click on the visible player may never activate the Tauri top-level window.
+/// Only raise when `WindowFromPoint` actually hit our HWND tree — never when
+/// the click landed on another app, the taskbar, or desktop around us.
 fn should_force_activate(
     our_contains_pt: bool,
     we_are_foreground: bool,
     hit_belongs_to_us: bool,
-    fg_covers_pt: bool,
 ) -> bool {
-    if !our_contains_pt || we_are_foreground {
-        return false;
-    }
-    // Normal hit on our hierarchy, or click-through fell through to a window
-    // behind us while no other foreground window covers this pixel.
-    hit_belongs_to_us || !fg_covers_pt
+    our_contains_pt && !we_are_foreground && hit_belongs_to_us
+}
+
+/// Play/pause toggle is a focused video-surface click only.
+///
+/// The activating click on an unfocused window must not toggle (standard
+/// desktop-player behavior). Clicks whose hit-test is not our HWND tree
+/// (other app, taskbar, Alt-Tab target) must not toggle either — otherwise a
+/// paused fullscreen player resumes in the background.
+fn should_emit_surface_click(
+    our_contains_pt: bool,
+    we_are_foreground: bool,
+    hit_belongs_to_us: bool,
+) -> bool {
+    our_contains_pt && we_are_foreground && hit_belongs_to_us
 }
 
 fn pt_in_rect(pt: POINT, rect: RECT) -> bool {
@@ -129,35 +142,32 @@ unsafe fn force_foreground(hwnd: HWND) {
     }
 }
 
-/// If the user clicked the visible player while another app has focus, raise Replay.
-unsafe fn maybe_activate_on_click(parent: HWND, pt: POINT) {
+unsafe fn we_are_foreground(parent: HWND) -> bool {
     unsafe {
-        if parent.0.is_null() || !IsWindow(Some(parent)).as_bool() {
-            return;
-        }
-        let mut our_rect = RECT::default();
-        let _ = GetWindowRect(parent, &mut our_rect);
-        let our_contains = pt_in_rect(pt, our_rect);
-
         let fg = GetForegroundWindow();
-        let we_are_fg = !fg.0.is_null() && (fg == parent || IsChild(parent, fg).as_bool());
+        !fg.0.is_null() && (fg == parent || IsChild(parent, fg).as_bool())
+    }
+}
 
+unsafe fn hit_belongs_to_us(parent: HWND, pt: POINT) -> bool {
+    unsafe {
         let under = WindowFromPoint(pt);
-        let under_root = GetAncestor(under, GA_ROOT);
-        let hit_belongs_to_us = !under.0.is_null()
-            && (under == parent || under_root == parent || IsChild(parent, under).as_bool());
-
-        let mut fg_covers = false;
-        if !fg.0.is_null() && fg != parent {
-            let mut fg_rect = RECT::default();
-            if GetWindowRect(fg, &mut fg_rect).is_ok() {
-                fg_covers = pt_in_rect(pt, fg_rect);
-            }
+        if under.0.is_null() {
+            return false;
         }
+        under == parent || GetAncestor(under, GA_ROOT) == parent || IsChild(parent, under).as_bool()
+    }
+}
 
-        if should_force_activate(our_contains, we_are_fg, hit_belongs_to_us, fg_covers) {
-            force_foreground(parent);
-        }
+/// If the user clicked the visible player while another app has focus, raise Replay.
+unsafe fn maybe_activate_on_click(
+    parent: HWND,
+    our_contains: bool,
+    we_are_fg: bool,
+    hit_ours: bool,
+) {
+    if should_force_activate(our_contains, we_are_fg, hit_ours) {
+        unsafe { force_foreground(parent) };
     }
 }
 
@@ -165,8 +175,10 @@ unsafe fn maybe_activate_on_click(parent: HWND, pt: POINT) {
 /// webview never sees mouse movement over the video and chrome can never be
 /// revealed. The hook sees all mouse input regardless of which HWND owns it and
 /// pokes the frontend to reveal chrome while the cursor is over our window.
-/// Clicks also force-activate the top-level window (click-through / NOACTIVATE
-/// otherwise leaves Replay behind floating apps like WhatsApp).
+/// Clicks raise Replay only when the hit-test is our HWND tree (click-through /
+/// NOACTIVATE otherwise leaves Replay behind floating apps like WhatsApp).
+/// Play/pause is a separate, focused-only surface click — never the click that
+/// switches away to another application.
 unsafe extern "system" fn activity_mouse_proc(
     code: i32,
     wparam: WPARAM,
@@ -180,60 +192,56 @@ unsafe extern "system" fn activity_mouse_proc(
             || msg == WM_MBUTTONDOWN
         {
             let parent = HWND(ACTIVITY_PARENT.load(Ordering::Relaxed) as *mut _);
-            let mut rect = RECT::default();
             let pt = unsafe { (*(lparam.0 as *const MSLLHOOKSTRUCT)).pt };
-            let inside = unsafe {
-                let _ = GetWindowRect(parent, &mut rect);
-                pt_in_rect(pt, rect)
+            let mut rect = RECT::default();
+            let live = unsafe {
+                !parent.0.is_null()
+                    && IsWindow(Some(parent)).as_bool()
+                    && IsWindowVisible(parent).as_bool()
+                    && !IsIconic(parent).as_bool()
             };
+            let inside = live
+                && unsafe {
+                    let _ = GetWindowRect(parent, &mut rect);
+                    pt_in_rect(pt, rect)
+                };
             if inside {
-                // Activation must not be throttled — every click should raise us.
+                let hit_ours = unsafe { hit_belongs_to_us(parent, pt) };
+                // Activation must not be throttled — every click on *us* should raise us.
                 if msg == WM_LBUTTONDOWN || msg == WM_RBUTTONDOWN || msg == WM_MBUTTONDOWN {
-                    // Hit-test probe for surface-click gating (WH_MOUSE_LL sees global input).
-                    let (hit_belongs_to_us, fg_covers) = unsafe {
-                        let fg = GetForegroundWindow();
-                        let under = WindowFromPoint(pt);
-                        let under_root = GetAncestor(under, GA_ROOT);
-                        let hit_belongs_to_us = !under.0.is_null()
-                            && (under == parent
-                                || under_root == parent
-                                || IsChild(parent, under).as_bool());
-                        let mut fg_covers = false;
-                        if !fg.0.is_null() && fg != parent {
-                            let mut fg_rect = RECT::default();
-                            if GetWindowRect(fg, &mut fg_rect).is_ok() {
-                                fg_covers = pt_in_rect(pt, fg_rect);
-                            }
-                        }
-                        (hit_belongs_to_us, fg_covers)
-                    };
-                    unsafe { maybe_activate_on_click(parent, pt) };
+                    // Read focus *before* raising, so the activating click cannot
+                    // also toggle play/pause.
+                    let we_are_fg = unsafe { we_are_foreground(parent) };
+                    unsafe { maybe_activate_on_click(parent, true, we_are_fg, hit_ours) };
                     // Video host is HWND_TOP and swallows webview clicks; emit so
                     // the frontend can toggle play/pause on the video surface.
-                    // Gate: never treat clicks that land on another foreground
-                    // window as surface clicks (pt-in-rect alone is not enough —
-                    // WH_MOUSE_LL sees global input).
-                    if msg == WM_LBUTTONDOWN {
-                        let allow_surface = hit_belongs_to_us || !fg_covers;
-                        if allow_surface {
-                            if let Some(app) = ACTIVITY_APP.get() {
-                                let payload = SurfaceClickPayload {
-                                    x: pt.x - rect.left,
-                                    y: pt.y - rect.top,
-                                    window_w: rect.right - rect.left,
-                                    window_h: rect.bottom - rect.top,
-                                };
-                                let _ = app.emit("player://surface-click", &payload);
-                            }
+                    if msg == WM_LBUTTONDOWN && should_emit_surface_click(true, we_are_fg, hit_ours)
+                    {
+                        if let Some(app) = ACTIVITY_APP.get() {
+                            let payload = SurfaceClickPayload {
+                                x: pt.x - rect.left,
+                                y: pt.y - rect.top,
+                                window_w: rect.right - rect.left,
+                                window_h: rect.bottom - rect.top,
+                            };
+                            let _ = app.emit("player://surface-click", &payload);
                         }
                     }
                 }
-                let now = now_ms();
-                let last = ACTIVITY_LAST_EMIT.load(Ordering::Relaxed);
-                if now.saturating_sub(last) >= ACTIVITY_EMIT_MS {
-                    ACTIVITY_LAST_EMIT.store(now, Ordering::Relaxed);
-                    if let Some(app) = ACTIVITY_APP.get() {
-                        let _ = app.emit("player://activity", ());
+                if hit_ours {
+                    let now = now_ms();
+                    let last = ACTIVITY_LAST_EMIT.load(Ordering::Relaxed);
+                    if now.saturating_sub(last) >= ACTIVITY_EMIT_MS {
+                        ACTIVITY_LAST_EMIT.store(now, Ordering::Relaxed);
+                        if let Some(app) = ACTIVITY_APP.get() {
+                            let payload = SurfaceClickPayload {
+                                x: pt.x - rect.left,
+                                y: pt.y - rect.top,
+                                window_w: rect.right - rect.left,
+                                window_h: rect.bottom - rect.top,
+                            };
+                            let _ = app.emit("player://activity", &payload);
+                        }
                     }
                 }
             }
@@ -277,6 +285,13 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -
         WM_TIMER => {
             if w.0 == CLICK_THROUGH_TIMER {
                 apply_click_through(hwnd);
+                let left = CLICK_THROUGH_LEFT.load(Ordering::Relaxed);
+                if left <= 1 {
+                    CLICK_THROUGH_LEFT.store(0, Ordering::Relaxed);
+                    let _ = KillTimer(Some(hwnd), CLICK_THROUGH_TIMER);
+                } else {
+                    CLICK_THROUGH_LEFT.store(left - 1, Ordering::Relaxed);
+                }
             }
             LRESULT(0)
         }
@@ -492,12 +507,31 @@ fn menu_hole(full_w: u32, full_h: u32, cutout: ChromeCutout) -> Option<(i32, i32
     Some((x0 as i32, y0 as i32, x1 as i32, y1 as i32))
 }
 
-/// Corner diameter for `CreateRoundRectRgn`, matching CSS `--radius-md` (16px)
-/// scaled into the physical menu rect (~10.5rem / 168 CSS px wide).
+/// True for the fullscreen close chip: small and within 15% of square.
+fn is_circular_chip(menu_w: u32, menu_h: u32) -> bool {
+    let shorter = menu_w.min(menu_h).max(1);
+    let longer = menu_w.max(menu_h).max(1);
+    shorter <= 128 && longer.saturating_mul(100) <= shorter.saturating_mul(115)
+}
+
+fn square_hole(mx0: i32, my0: i32, mx1: i32, my1: i32) -> (i32, i32, i32, i32) {
+    let w = mx1 - mx0;
+    let h = my1 - my0;
+    let side = w.max(h);
+    let cx = mx0 + w / 2;
+    let cy = my0 + h / 2;
+    let x0 = cx - side / 2;
+    let y0 = cy - side / 2;
+    (x0, y0, x0 + side, y0 + side)
+}
+
+/// Corner diameter for `CreateRoundRectRgn` on rectangular overlay panels.
+///
+/// Circular close chips use `CreateEllipticRgn`; panels match the CSS 12px border radius.
 fn menu_corner_diameter(menu_w: u32, menu_h: u32) -> i32 {
-    let shorter = menu_w.min(menu_h).max(1) as f64;
-    let radius = (shorter * (16.0 / 168.0)).round() as i32;
-    (radius * 2).clamp(24, 48)
+    let shorter = menu_w.min(menu_h).max(1);
+    let radius = (shorter as f64 * (12.0 / 300.0)).round() as i32;
+    (radius * 2).clamp(16, 48)
 }
 
 /// Keep the host full-bleed for correct mpv aspect, but punch out chrome /
@@ -524,10 +558,18 @@ fn apply_chrome_cutout(hwnd: HWND, full_w: u32, full_h: u32, cutout: ChromeCutou
         let rgn = CreateRectRgn(0, y0, x1, y1);
 
         if let Some((mx0, my0, mx1, my1)) = menu {
-            // Round the hole to match `.more-panel` border-radius; a sharp rect
-            // makes the menu silhouette square against HWND_TOP video.
-            let diameter = menu_corner_diameter(cutout.menu_w, cutout.menu_h);
-            let hole = CreateRoundRectRgn(mx0, my0, mx1, my1, diameter, diameter);
+            let hole_w = (mx1 - mx0).max(0) as u32;
+            let hole_h = (my1 - my0).max(0) as u32;
+            let hole = if is_circular_chip(hole_w, hole_h) {
+                // Binary ellipse (no AA). Frontend insets this rect into the
+                // opaque gray disc so the jagged edge is gray-on-video,
+                // not a translucent SVG fringe.
+                let (x0, y0, x1, y1) = square_hole(mx0, my0, mx1, my1);
+                CreateEllipticRgn(x0, y0, x1, y1)
+            } else {
+                let diameter = menu_corner_diameter(cutout.menu_w, cutout.menu_h);
+                CreateRoundRectRgn(mx0, my0, mx1, my1, diameter, diameter)
+            };
             let _ = CombineRgn(Some(rgn), Some(rgn), Some(hole), RGN_DIFF);
             let _ = DeleteObject(hole.into());
         }
@@ -584,9 +626,10 @@ impl VideoHost for WindowsVideoHost {
             );
             let _ = ShowWindow(self.hwnd, SW_SHOW);
             apply_click_through(self.hwnd);
-            // Re-apply after libmpv creates its VO child HWND.
+            // Re-apply until libmpv creates its VO child HWND, then stop.
+            CLICK_THROUGH_LEFT.store(CLICK_THROUGH_TICKS, Ordering::Relaxed);
             let _ = SetTimer(Some(self.hwnd), CLICK_THROUGH_TIMER, 300, None);
-            tracing::info!(
+            tracing::debug!(
                 full_w,
                 full_h,
                 cutout = ?self.cutout,
@@ -613,8 +656,10 @@ impl VideoHost for WindowsVideoHost {
                 let _ = ShowWindow(self.hwnd, SW_SHOW);
                 bring_above_webview(self.hwnd);
                 apply_click_through(self.hwnd);
+                CLICK_THROUGH_LEFT.store(CLICK_THROUGH_TICKS, Ordering::Relaxed);
                 let _ = SetTimer(Some(self.hwnd), CLICK_THROUGH_TIMER, 300, None);
             } else {
+                CLICK_THROUGH_LEFT.store(0, Ordering::Relaxed);
                 let _ = KillTimer(Some(self.hwnd), CLICK_THROUGH_TIMER);
                 // Park off-screen instead of SW_HIDE: mpv keeps presenting to its
                 // swapchain while hidden, and its promoted hardware overlay plane
@@ -676,13 +721,28 @@ mod tests {
     }
 
     #[test]
-    fn menu_corner_diameter_tracks_css_radius_md() {
-        // ~168 CSS px panel at 1.25 DPR → physical w ≈ 210 → radius ≈ 20 → diameter 40
-        assert_eq!(super::menu_corner_diameter(210, 250), 40);
-        assert_eq!(super::menu_corner_diameter(168, 200), 32);
-        // Clamp extremes
-        assert_eq!(super::menu_corner_diameter(40, 40), 24);
-        assert_eq!(super::menu_corner_diameter(2000, 2000), 48);
+    fn menu_corner_diameter_tracks_css_radius_8px() {
+        // 8px CSS radius on a ~168 CSS px panel.
+        // 168 CSS at 1.25 DPR → physical w ≈ 210 → radius 10 → diameter 20
+        assert_eq!(super::menu_corner_diameter(210, 250), 20);
+        assert_eq!(super::menu_corner_diameter(168, 200), 16);
+        assert_eq!(super::menu_corner_diameter(2000, 2000), 24);
+    }
+
+    #[test]
+    fn small_near_square_overlay_is_a_circular_chip() {
+        assert!(super::is_circular_chip(40, 40));
+        assert!(super::is_circular_chip(72, 72));
+        assert!(super::is_circular_chip(50, 48));
+        assert!(!super::is_circular_chip(210, 250));
+        assert!(!super::is_circular_chip(2000, 2000));
+    }
+
+    #[test]
+    fn square_hole_expands_a_1px_off_rect_to_a_circle_bounds() {
+        // 40×41 → 41×41 square centered on the original rect.
+        assert_eq!(super::square_hole(10, 20, 50, 61), (10, 20, 51, 61));
+        assert_eq!(super::square_hole(0, 0, 40, 40), (0, 0, 40, 40));
     }
 
     #[test]
@@ -731,23 +791,29 @@ mod tests {
 
     #[test]
     fn activates_when_click_hits_our_window() {
-        assert!(super::should_force_activate(true, false, true, true));
-        assert!(super::should_force_activate(true, false, true, false));
+        assert!(super::should_force_activate(true, false, true));
     }
 
     #[test]
-    fn activates_on_click_through_fallthrough_if_fg_does_not_cover() {
-        assert!(super::should_force_activate(true, false, false, false));
-    }
-
-    #[test]
-    fn does_not_steal_when_floating_fg_covers_click() {
-        assert!(!super::should_force_activate(true, false, false, true));
+    fn does_not_steal_when_hit_is_not_ours() {
+        // Other app, taskbar, or desktop around a fullscreen player.
+        assert!(!super::should_force_activate(true, false, false));
     }
 
     #[test]
     fn skips_when_already_foreground_or_outside() {
-        assert!(!super::should_force_activate(true, true, true, false));
-        assert!(!super::should_force_activate(false, false, true, false));
+        assert!(!super::should_force_activate(true, true, true));
+        assert!(!super::should_force_activate(false, false, true));
+    }
+
+    #[test]
+    fn surface_click_only_when_focused_and_hit_is_ours() {
+        assert!(super::should_emit_surface_click(true, true, true));
+        // Click that leaves Replay (other window still geometrically inside our rect).
+        assert!(!super::should_emit_surface_click(true, true, false));
+        // First click on an unfocused player: raise, don't toggle.
+        assert!(!super::should_emit_surface_click(true, false, true));
+        assert!(!super::should_emit_surface_click(true, false, false));
+        assert!(!super::should_emit_surface_click(false, true, true));
     }
 }

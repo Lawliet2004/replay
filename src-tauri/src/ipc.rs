@@ -1,5 +1,5 @@
 use crate::error::AppError;
-use crate::player::host::{create_host, ChromeCutout, VideoHost};
+use crate::player::host::{create_host, ChromeCutout, ParentSurface, VideoHost};
 use crate::player::model::{PlayerCommand, PlayerEvent, PlayerSnapshot, Settings};
 use crate::player::PlayerHandle;
 use crate::settings::SettingsStore;
@@ -75,6 +75,7 @@ pub struct AppState {
     pub player: Mutex<Option<PlayerHandle>>,
     pub video_host: Mutex<Option<Box<dyn VideoHost>>>,
     pub latest: Mutex<PlayerSnapshot>,
+    pub settings_latest: Mutex<Settings>,
     pub settings_path: Mutex<PathBuf>,
     pub parent_wid: Mutex<i64>,
     pub host_layout: Mutex<HostLayout>,
@@ -82,10 +83,12 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(app_data: PathBuf) -> Self {
+        let settings = SettingsStore::load(&app_data).get().clone();
         Self {
             player: Mutex::new(None),
             video_host: Mutex::new(None),
             latest: Mutex::new(PlayerSnapshot::default()),
+            settings_latest: Mutex::new(settings),
             settings_path: Mutex::new(app_data),
             parent_wid: Mutex::new(0),
             host_layout: Mutex::new(HostLayout::default()),
@@ -95,10 +98,11 @@ impl AppState {
 
 #[tauri::command]
 pub fn player_command(
+    window: tauri::WebviewWindow,
     state: State<'_, Arc<AppState>>,
     command: PlayerCommand,
 ) -> Result<PlayerSnapshot, AppError> {
-    // Host HWND lives on the UI thread — apply bounds here, never in the actor.
+    // Host HWND/X11 window must be mutated on the UI thread, never the invoke worker.
     if let PlayerCommand::SetHostBounds {
         width,
         height,
@@ -112,21 +116,43 @@ pub fn player_command(
         ..
     } = &command
     {
-        apply_host_bounds(
-            &state,
-            *width,
-            *height,
-            *chrome_top,
-            *chrome_bottom,
-            *chrome_right,
-            ChromeCutout {
-                menu_x: *menu_x,
-                menu_y: *menu_y,
-                menu_w: *menu_w,
-                menu_h: *menu_h,
-                ..Default::default()
-            },
-        );
+        let st = Arc::clone(&state);
+        let width = *width;
+        let height = *height;
+        let chrome_top = *chrome_top;
+        let chrome_bottom = *chrome_bottom;
+        let chrome_right = *chrome_right;
+        let cutout = ChromeCutout {
+            menu_x: *menu_x,
+            menu_y: *menu_y,
+            menu_w: *menu_w,
+            menu_h: *menu_h,
+            ..Default::default()
+        };
+        if window
+            .run_on_main_thread(move || {
+                apply_host_bounds(
+                    &st,
+                    width,
+                    height,
+                    chrome_top,
+                    chrome_bottom,
+                    chrome_right,
+                    cutout,
+                );
+            })
+            .is_err()
+        {
+            apply_host_bounds(
+                &state,
+                width,
+                height,
+                chrome_top,
+                chrome_bottom,
+                chrome_right,
+                cutout,
+            );
+        }
     }
 
     if let Some(player) = state.player.lock().as_ref() {
@@ -148,8 +174,7 @@ pub fn get_snapshot(state: State<'_, Arc<AppState>>) -> PlayerSnapshot {
 
 #[tauri::command]
 pub fn get_settings(state: State<'_, Arc<AppState>>) -> Settings {
-    let path = state.settings_path.lock().clone();
-    SettingsStore::load(&path).get().clone()
+    state.settings_latest.lock().clone()
 }
 
 #[tauri::command]
@@ -157,14 +182,26 @@ pub fn update_settings(
     state: State<'_, Arc<AppState>>,
     settings: Settings,
 ) -> Result<Settings, AppError> {
-    let path = state.settings_path.lock().clone();
-    let mut store = SettingsStore::load(&path);
-    let saved = store.update(settings)?.clone();
-    Ok(saved)
+    let normalized = settings.normalized();
+    if let Some(player) = state.player.lock().as_ref() {
+        player.send(PlayerCommand::ApplySettings {
+            request_id: Uuid::new_v4().to_string(),
+            settings: normalized.clone(),
+        });
+        *state.settings_latest.lock() = normalized.clone();
+        Ok(normalized)
+    } else {
+        Err(AppError::new(
+            crate::error::ErrorCode::EngineMissing,
+            "Player is not initialized yet.",
+            true,
+        ))
+    }
 }
 
 #[tauri::command]
 pub fn open_media_paths(
+    window: tauri::WebviewWindow,
     state: State<'_, Arc<AppState>>,
     paths: Vec<String>,
     replace: bool,
@@ -174,7 +211,7 @@ pub fn open_media_paths(
         paths,
         replace,
     };
-    player_command(state, cmd)
+    player_command(window, state, cmd)
 }
 
 #[tauri::command]
@@ -206,11 +243,11 @@ pub fn export_types() -> Result<(), String> {
 pub fn start_player(
     app: &AppHandle,
     state: &Arc<AppState>,
-    parent_wid: i64,
+    parent: ParentSurface,
     width: u32,
     height: u32,
 ) {
-    *state.parent_wid.lock() = parent_wid;
+    *state.parent_wid.lock() = parent.wid;
     {
         let mut layout = state.host_layout.lock();
         layout.client_w = width.max(1);
@@ -219,7 +256,7 @@ pub fn start_player(
         layout.visible = false;
     }
 
-    let embed_wid = match create_host(parent_wid, width, height) {
+    let embed_wid = match create_host(parent, width, height) {
         Ok(host) => {
             let wid = host.handle().wid;
             *state.video_host.lock() = Some(host);
@@ -253,7 +290,7 @@ pub fn start_player(
     // movement is driven by a low-level hook that sees input regardless of which
     // HWND owns it.
     #[cfg(windows)]
-    crate::player::host::install_activity_hook(parent_wid, app.clone());
+    crate::player::host::install_activity_hook(parent.wid, app.clone());
 
     let app2 = app.clone();
     let state2 = Arc::clone(state);
@@ -288,6 +325,9 @@ pub fn start_player(
                     }
                 }
                 PlayerEvent::Ready { .. } => {}
+                PlayerEvent::Settings { settings } => {
+                    *state2.settings_latest.lock() = settings.clone();
+                }
             }
             let _ = app2.emit("player://event", event);
         }
@@ -387,10 +427,20 @@ fn commit_host_layout(state: &AppState) {
         if let Err(err) = host.set_chrome_cutout(layout.cutout()) {
             tracing::warn!(error = %err.message, "video host chrome cutout failed");
         }
-        if let Err(err) = host.set_bounds(0, 0, layout.client_w.max(1), layout.video_h.max(1)) {
+        // Windows ignores these and full-bleeds + SetWindowRgn. Linux/macOS honor
+        // the inset so HTML chrome is not covered by an opaque child window.
+        let x = 0i32;
+        let y = layout.chrome_top as i32;
+        let w = layout.client_w.saturating_sub(layout.chrome_right).max(1);
+        let h = layout
+            .video_h
+            .saturating_sub(layout.chrome_top)
+            .saturating_sub(layout.chrome_bottom)
+            .max(1);
+        if let Err(err) = host.set_bounds(x, y, w, h) {
             tracing::warn!(error = %err.message, "video host resize failed");
         } else {
-            tracing::info!(
+            tracing::debug!(
                 w = layout.client_w,
                 h = layout.client_h,
                 video_h = layout.video_h,

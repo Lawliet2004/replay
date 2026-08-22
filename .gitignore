@@ -12,7 +12,7 @@ dist
 dist-ssr
 *.local
 
-# Editor
+# Editor / Tool Cache
 .vscode/*
 !.vscode/extensions.json
 .idea
@@ -22,6 +22,8 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+.commandcode/
+graphify-out/
 
 # Native runtime blobs (manifests stay tracked)
 native-deps/**/bin/

@@ -6,6 +6,7 @@ pub mod playlist;
 pub mod settings;
 
 use ipc::{resize_video_host, start_player, AppState};
+use player::host::ParentSurface;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::sync::Arc;
 use tauri::{Manager, RunEvent, WindowEvent};
@@ -37,16 +38,16 @@ pub fn run() {
             // reserved bottom strip (see apply_host_bounds / App.tsx sync).
             let _ = window.set_background_color(Some(tauri::window::Color(11, 13, 16, 255)));
 
+            let parent = window_parent(&window);
             #[cfg(windows)]
-            if let Some(wid) = window_wid(&window) {
-                apply_rounded_corners(wid);
+            if parent.wid != 0 {
+                apply_rounded_corners(parent.wid);
             }
 
-            let parent_wid = window_wid(&window).unwrap_or(0);
             let size = window
                 .inner_size()
                 .unwrap_or(tauri::PhysicalSize::new(1100, 700));
-            start_player(app.handle(), &state, parent_wid, size.width, size.height);
+            start_player(app.handle(), &state, parent, size.width, size.height);
 
             let cli_paths: Vec<String> = std::env::args()
                 .skip(1)
@@ -112,18 +113,32 @@ pub fn run() {
     });
 }
 
-fn window_wid(window: &tauri::WebviewWindow) -> Option<i64> {
-    let handle = window.window_handle().ok()?;
+fn window_parent(window: &tauri::WebviewWindow) -> ParentSurface {
+    let Ok(handle) = window.window_handle() else {
+        return ParentSurface { wid: 0, display: 0 };
+    };
     match handle.as_raw() {
         #[cfg(windows)]
-        RawWindowHandle::Win32(h) => Some(h.hwnd.get() as i64),
+        RawWindowHandle::Win32(h) => ParentSurface {
+            wid: h.hwnd.get() as i64,
+            display: 0,
+        },
         #[cfg(all(unix, not(target_os = "macos")))]
-        RawWindowHandle::Xlib(h) => Some(h.window as i64),
+        RawWindowHandle::Xlib(h) => ParentSurface {
+            wid: h.window as i64,
+            display: h.display.as_ptr() as i64,
+        },
         #[cfg(all(unix, not(target_os = "macos")))]
-        RawWindowHandle::Xcb(h) => Some(h.window.get() as i64),
+        RawWindowHandle::Xcb(h) => ParentSurface {
+            wid: h.window.get() as i64,
+            display: 0,
+        },
         #[cfg(target_os = "macos")]
-        RawWindowHandle::AppKit(h) => Some(h.ns_view.as_ptr() as i64),
-        _ => None,
+        RawWindowHandle::AppKit(h) => ParentSurface {
+            wid: h.ns_view.as_ptr() as i64,
+            display: 0,
+        },
+        _ => ParentSurface { wid: 0, display: 0 },
     }
 }
 

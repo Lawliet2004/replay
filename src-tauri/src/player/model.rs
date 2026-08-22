@@ -271,6 +271,10 @@ pub enum PlayerCommand {
         from: usize,
         to: usize,
     },
+    ApplySettings {
+        request_id: String,
+        settings: Settings,
+    },
     GetSnapshot {
         request_id: String,
     },
@@ -300,6 +304,9 @@ pub enum PlayerEvent {
     },
     Ready {
         load_generation: u64,
+    },
+    Settings {
+        settings: Settings,
     },
 }
 
@@ -374,6 +381,25 @@ impl Default for Settings {
     }
 }
 
+impl Settings {
+    /// Clamp and migrate a settings payload from disk or the overlay.
+    pub fn normalized(mut self) -> Self {
+        self.version = SETTINGS_VERSION;
+        self.recent.truncate(MAX_RECENTS);
+        self.resume_positions.truncate(MAX_RESUME_ENTRIES);
+        self.volume = self.volume.clamp(0.0, 150.0);
+        self.speed = self.speed.clamp(0.25, 3.0);
+        const ALLOWED: [f64; 5] = [5.0, 10.0, 20.0, 30.0, 60.0];
+        if !ALLOWED
+            .iter()
+            .any(|v| (*v - self.seek_step_secs).abs() < f64::EPSILON)
+        {
+            self.seek_step_secs = default_seek_step_secs();
+        }
+        self
+    }
+}
+
 impl PlayerCommand {
     pub fn request_id(&self) -> &str {
         match self {
@@ -398,6 +424,7 @@ impl PlayerCommand {
             | Self::RemovePlaylistItem { request_id, .. }
             | Self::PlayIndex { request_id, .. }
             | Self::ReorderPlaylist { request_id, .. }
+            | Self::ApplySettings { request_id, .. }
             | Self::GetSnapshot { request_id } => request_id,
         }
     }
@@ -497,5 +524,19 @@ mod tests {
         assert_eq!(out, r"C:\Users\me\My Video.mp4");
         let unc = path_for_mpv(std::path::PathBuf::from(r"\\?\UNC\server\share\a.mp4"));
         assert_eq!(unc, r"\\server\share\a.mp4");
+    }
+
+    #[test]
+    fn settings_normalized_clamps_and_seek_step() {
+        let s = Settings {
+            volume: 999.0,
+            speed: 0.01,
+            seek_step_secs: 7.0,
+            ..Settings::default()
+        };
+        let n = s.normalized();
+        assert_eq!(n.volume, 150.0);
+        assert_eq!(n.speed, 0.25);
+        assert_eq!(n.seek_step_secs, 5.0);
     }
 }

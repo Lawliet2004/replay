@@ -27,6 +27,7 @@ npm run tauri:build
 ```
 
 Ensure `native-deps/windows-x64/bin/libmpv-2.dll` exists before packaging so it is bundled beside the app.
+
 ## Quality gates
 
 ```bash
