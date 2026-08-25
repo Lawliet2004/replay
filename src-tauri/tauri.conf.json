@@ -47,9 +47,6 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "resources": {
-      "../native-deps/windows-x64/bin/libmpv-2.dll": "libmpv-2.dll"
-    },
     "windows": {
       "nsis": {
         "installMode": "currentUser",

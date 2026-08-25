@@ -189,14 +189,26 @@ fn candidate_paths() -> Vec<PathBuf> {
     #[cfg(target_os = "linux")]
     {
         paths.push(PathBuf::from("libmpv.so.2"));
+        paths.push(PathBuf::from("libmpv.so.1"));
+        paths.push(PathBuf::from("libmpv.so"));
         paths.push(PathBuf::from("/usr/lib/libmpv.so.2"));
+        paths.push(PathBuf::from("/usr/lib/libmpv.so.1"));
+        paths.push(PathBuf::from("/usr/lib/libmpv.so"));
         paths.push(PathBuf::from("/usr/lib/x86_64-linux-gnu/libmpv.so.2"));
+        paths.push(PathBuf::from("/usr/lib/x86_64-linux-gnu/libmpv.so.1"));
+        paths.push(PathBuf::from("/usr/lib/x86_64-linux-gnu/libmpv.so"));
+        paths.push(PathBuf::from("/usr/lib/aarch64-linux-gnu/libmpv.so.2"));
+        paths.push(PathBuf::from("/usr/lib/aarch64-linux-gnu/libmpv.so.1"));
+        paths.push(PathBuf::from("/usr/lib/aarch64-linux-gnu/libmpv.so"));
     }
     #[cfg(target_os = "macos")]
     {
         paths.push(PathBuf::from("libmpv.dylib"));
+        paths.push(PathBuf::from("libmpv.2.dylib"));
         paths.push(PathBuf::from("/opt/homebrew/lib/libmpv.dylib"));
+        paths.push(PathBuf::from("/opt/homebrew/lib/libmpv.2.dylib"));
         paths.push(PathBuf::from("/usr/local/lib/libmpv.dylib"));
+        paths.push(PathBuf::from("/usr/local/lib/libmpv.2.dylib"));
     }
     paths
 }

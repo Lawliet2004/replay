@@ -39,6 +39,10 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libmpv-dev libx11-dev
+      - name: macOS deps
+        if: runner.os == 'macOS'
+        run: |
+          brew install mpv
       - name: Fetch Windows libmpv
         if: runner.os == 'Windows'
         run: |

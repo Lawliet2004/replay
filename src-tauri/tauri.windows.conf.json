@@ -1,0 +1,8 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "resources": {
+      "../native-deps/windows-x64/bin/libmpv-2.dll": "libmpv-2.dll"
+    }
+  }
+}
