@@ -576,7 +576,7 @@ export default function App() {
       {!snap.fullscreen ? (
         <div
           ref={chromeRef}
-          className={`chrome ${chromeVisible ? "visible" : ""}`}
+          className={`chrome ${windowedChromeVisible ? "visible" : ""}`}
           onMouseEnter={() => {
             setHoveringChrome(true);
             bumpRef.current();
