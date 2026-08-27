@@ -429,14 +429,15 @@ select:focus-visible {
 .chrome:not(.visible) {
   background: transparent;
   pointer-events: none;
+  opacity: 0;
+  transform: translateY(6px);
 }
 
 .chrome:not(.visible) .controls-stack {
   pointer-events: none;
 }
 
-.chrome.visible,
-.app.show-chrome .chrome {
+.chrome.visible {
   opacity: 1;
   transform: translateY(0);
 }

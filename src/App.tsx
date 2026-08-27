@@ -7,6 +7,7 @@ import { FullscreenCloseButton, PlayerControls } from "./features/player/PlayerC
 import {
   PlaybackClickFeedback,
   type PlaybackClickFlash,
+  type PlaybackClickKind,
 } from "./features/player/PlaybackClickFeedback";
 import { usePlayerHotkeys } from "./features/player/useHotkeys";
 import { TitleBar } from "./features/player/TitleBar";
@@ -33,27 +34,12 @@ import { useChromeAutoHide } from "./features/player/useChromeAutoHide";
 import { useFullscreenClose } from "./features/player/useFullscreenClose";
 import { setPlayerFullscreen } from "./features/player/fullscreen";
 import { getSettings } from "./lib/ipc";
+import type { MediaItem } from "./generated/player";
 import { setSeekStepSecs } from "./features/player/seekPrefs";
+import { isFullscreenCloseHit, isSurfaceClickIgnored } from "./features/player/surfaceClick";
+import { detectAppPlatform } from "./lib/platform";
+import { Icon } from "./components/icons";
 import "./styles/app.css";
-
-function isSurfaceClickIgnored(target: EventTarget | null, chromeVisible: boolean): boolean {
-  const el = target instanceof Element ? target : null;
-  if (!el) return true;
-  if (
-    el.closest(
-      ".titlebar, .settings-popup, .empty-hero, .error-banner, .status-pill, .fullscreen-close",
-    )
-  ) {
-    return true;
-  }
-  if (chromeVisible && el.closest(".chrome")) return true;
-  if (
-    el.closest("button, input, select, textarea, [role='slider'], [role='menu'], [role='menuitem']")
-  ) {
-    return true;
-  }
-  return false;
-}
 
 export default function App() {
   const snap = usePlayerSnapshot(
@@ -69,6 +55,14 @@ export default function App() {
   const [settingsView, setSettingsView] = useState<SettingsView>("root");
   const settingsViewRef = useRef<SettingsView>("root");
   const [clickFlash, setClickFlash] = useState<PlaybackClickFlash | null>(null);
+  /** True while a file drag is hovering over the window. */
+  const [isDragOver, setIsDragOver] = useState(false);
+  /** Most recent files, fetched once on mount. */
+  const [recents, setRecents] = useState<MediaItem[]>([]);
+  /** Tracks the most recently dismissed error so the banner stays hidden
+   *  until the backend emits a new error (different correlationId). */
+  const [dismissedErrorId, setDismissedErrorId] = useState<string | null>(null);
+  const errorVisible = Boolean(snap.error) && snap.error?.correlationId !== dismissedErrorId;
 
   const hasMedia = Boolean(snap.current) && snap.phase !== "idle" && snap.phase !== "error";
   const overlayOpen = settingsOpen;
@@ -93,6 +87,9 @@ export default function App() {
   const chromeRef = useRef<HTMLDivElement | null>(null);
   const fsCloseRef = useRef<HTMLDivElement | null>(null);
   const lastHostRef = useRef<string>("");
+  /** Last known bounds of the windowed chrome (CSS px). Used to swallow clicks
+   *  on the hidden gear/settings/buttons so they don't toggle playback. */
+  const chromeRectRef = useRef<DOMRect | null>(null);
   const syncHostRef = useRef<() => void>(() => {});
   const chromeVisibleRef = useRef(chromeVisible);
   chromeVisibleRef.current = chromeVisible;
@@ -107,6 +104,10 @@ export default function App() {
   const setPointerYRef = useRef(setPointerY);
   setPointerYRef.current = setPointerY;
   const flashTokenRef = useRef(0);
+  const flashPlayback = useCallback((kind: PlaybackClickKind) => {
+    flashTokenRef.current += 1;
+    setClickFlash({ kind, token: flashTokenRef.current });
+  }, []);
 
   // Loading: hide the HWND_TOP host so HTML banners are visible.
   // Settings uses a measured overlay hole so video keeps playing around it.
@@ -134,7 +135,10 @@ export default function App() {
   useEffect(() => {
     void startPlayerStore();
     void getSettings()
-      .then((s) => setSeekStepSecs(s.seekStepSecs))
+      .then((s) => {
+        setSeekStepSecs(s.seekStepSecs);
+        setRecents(s.recent.slice(0, 6));
+      })
       .catch(() => {});
   }, []);
 
@@ -198,8 +202,22 @@ export default function App() {
       setSettingsOpen(true);
     },
     onOpen: () => void openFiles(),
+    onPeekChrome: () => {
+      // `/` reveals the chrome for ~1s; the auto-hide timer will fade it
+      // back out. Only useful when the windowed chrome would actually be
+      // visible (i.e., not in fullscreen and there is media).
+      if (snap.fullscreen || !hasMedia) return;
+      bumpRef.current();
+    },
+    onFlashPlayback: (kind) => flashPlayback(kind),
     onEscape: () => {
-      if (settingsOpen) return;
+      // Close the most-recently-opened overlay first (settings), then exit
+      // fullscreen. The SettingsPopup handles its own sub-view Escape chain.
+      if (settingsOpen) {
+        setSettingsOpen(false);
+        setSettingsView("root");
+        return;
+      }
       if (snap.fullscreen) {
         void setPlayerFullscreen(false);
       }
@@ -211,7 +229,16 @@ export default function App() {
     const un = win.onDragDropEvent((event) => {
       if (event.payload.type === "drop") {
         const paths = event.payload.paths.filter((p) => !p.includes("://"));
-        if (paths.length) void dispatch({ type: "open_paths", paths, replace: true });
+        if (paths.length) {
+          // Drop APPENDS to the queue so a single file never wipes a long
+          // playlist. Modifier-keyed "replace" is a future enhancement.
+          void dispatch({ type: "open_paths", paths, replace: false });
+        }
+        setIsDragOver(false);
+      } else if (event.payload.type === "enter" || event.payload.type === "over") {
+        setIsDragOver(true);
+      } else if (event.payload.type === "leave") {
+        setIsDragOver(false);
       }
     });
     return () => {
@@ -228,6 +255,13 @@ export default function App() {
       const measuredChrome = chromeRef.current?.getBoundingClientRect().height;
       const measuredTitle = titlebarRef.current?.getBoundingClientRect().height;
       const measuredClose = fsCloseRef.current?.getBoundingClientRect();
+      // Track the chrome rect (even when hidden) so the surface-click guard
+      // can swallow clicks that would otherwise toggle playback on the spot
+      // where a hidden button lives.
+      const chromeEl = chromeRef.current;
+      if (chromeEl) {
+        chromeRectRef.current = chromeEl.getBoundingClientRect();
+      }
       const chromeBottom =
         chromeBottomLogical > 0
           ? Math.round(
@@ -361,6 +395,10 @@ export default function App() {
     });
 
     type SurfaceClickPayload = { x: number; y: number; window_w: number; window_h: number };
+    const unCloseFs = listen("player://close-fullscreen", () => {
+      void setPlayerFullscreen(false);
+    });
+
     const unSurface = listen<SurfaceClickPayload>("player://surface-click", (ev) => {
       const phase = phaseRef.current;
       const phaseOk = phase === "playing" || phase === "paused";
@@ -372,7 +410,19 @@ export default function App() {
       const clientX = x * scaleX;
       const clientY = y * scaleY;
       const hit = document.elementFromPoint(clientX, clientY);
-      const ignored = isSurfaceClickIgnored(hit, chromeVisibleRef.current);
+      // Native close overlay covers the HTML chip, so the button's onClick never
+      // fires. Exit fullscreen here instead of treating it as a play/pause click.
+      if (isFullscreenCloseHit(hit)) {
+        void setPlayerFullscreen(false);
+        return;
+      }
+      const ignored = isSurfaceClickIgnored(
+        hit,
+        chromeVisibleRef.current,
+        clientX,
+        clientY,
+        chromeRectRef.current,
+      );
       if (ignored) return;
       if (overlay) {
         dismissOverlaysRef.current();
@@ -380,17 +430,14 @@ export default function App() {
       }
       if (!phaseOk) return;
 
-      flashTokenRef.current += 1;
-      setClickFlash({
-        kind: phase === "playing" ? "pause" : "play",
-        token: flashTokenRef.current,
-      });
+      flashPlayback(phase === "playing" ? "pause" : "play");
       void dispatch({ type: "toggle_pause" });
     });
 
     return () => {
       void unActivity.then((f) => f());
       void unSurface.then((f) => f());
+      void unCloseFs.then((f) => f());
     };
   }, []);
 
@@ -422,8 +469,9 @@ export default function App() {
   return (
     <div
       className={`app ${snap.fullscreen ? "is-fullscreen" : ""} ${
-        chromeVisible && !snap.fullscreen ? "show-chrome" : "hide-chrome"
-      } ${hasMedia ? "has-media" : ""}`}
+        windowedChromeVisible ? "show-chrome" : "hide-chrome"
+      } ${hasMedia ? "has-media" : ""} ${isDragOver ? "is-drag-over" : ""}`}
+      data-platform={detectAppPlatform()}
       style={
         {
           ["--chrome-reserve" as string]: `${chromeReserve}px`,
@@ -443,7 +491,7 @@ export default function App() {
       ) : null}
 
       {snap.phase === "idle" && !snap.current && (
-        <div className="empty-hero">
+        <div className={`empty-hero ${isDragOver ? "is-drag-over" : ""}`}>
           <div className="brand-lockup">
             <ReplayLogo size={72} className="brand-logo" title="Replay" />
             <div className="brand">Replay</div>
@@ -452,25 +500,78 @@ export default function App() {
           <button type="button" className="primary" onClick={() => void openFiles()}>
             Open files
           </button>
-          <p className="hint">Drop files here · Press ? for shortcuts</p>
+          <p className="hint">
+            Drop files here, or press{" "}
+            <button
+              type="button"
+              className="hint-key"
+              onClick={() => {
+                if (snap.fullscreen) return;
+                bumpRef.current();
+                settingsViewRef.current = "shortcuts";
+                setSettingsView("shortcuts");
+                setSettingsOpen(true);
+              }}
+              aria-label="Show keyboard shortcuts"
+            >
+              ?
+            </button>{" "}
+            for shortcuts
+          </p>
+          {recents.length > 0 ? (
+            <div className="recents" aria-label="Recent files">
+              <h3 className="recents-title">Recent</h3>
+              <ul className="recents-list">
+                {recents.map((r) => (
+                  <li key={r.id}>
+                    <button
+                      type="button"
+                      className="recents-row"
+                      onClick={() =>
+                        void dispatch({ type: "open_paths", paths: [r.path], replace: true })
+                      }
+                      title={r.path}
+                    >
+                      <PlayGlyph />
+                      <span className="recents-name">{r.displayName}</span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
         </div>
       )}
 
-      {snap.phase === "loading" && <div className="status-pill">Loading…</div>}
+      {snap.phase === "loading" && (
+        <LoadingPill
+          onCancel={() => void dispatch({ type: "open_paths", paths: [], replace: true })}
+        />
+      )}
 
-      {snap.error && (
+      {errorVisible && snap.error ? (
         <div className="error-banner" role="alert">
           <div>
             <strong>Something went wrong</strong>
             <p>{snap.error.message}</p>
           </div>
-          {snap.error.recoverable && (
-            <button type="button" className="text-btn" onClick={() => void openFiles()}>
-              Open another file
+          <div className="error-banner-actions">
+            {snap.error.recoverable ? (
+              <button type="button" className="text-btn" onClick={() => void openFiles()}>
+                Open another file
+              </button>
+            ) : null}
+            <button
+              type="button"
+              className="icon-btn error-banner-dismiss"
+              aria-label="Dismiss error"
+              onClick={() => setDismissedErrorId(snap.error?.correlationId ?? null)}
+            >
+              <Icon name="close" size="sm" />
             </button>
-          )}
+          </div>
         </div>
-      )}
+      ) : null}
 
       {!snap.fullscreen ? (
         <div
@@ -517,5 +618,41 @@ export default function App() {
         panelRef={settingsPanelRef}
       />
     </div>
+  );
+}
+
+/**
+ * Loading indicator with a spinner and a "still loading" copy + cancel after
+ * 10s. The cancel dispatches an empty open_paths which moves phase to idle
+ * (the backend treats empty paths as a no-op but refreshes the snapshot).
+ */
+function LoadingPill({ onCancel }: { onCancel: () => void }) {
+  const [slow, setSlow] = useState(false);
+  useEffect(() => {
+    const t = window.setTimeout(() => setSlow(true), 10_000);
+    return () => window.clearTimeout(t);
+  }, []);
+  return (
+    <div className="status-pill" role="status" aria-live="polite">
+      <span className="status-spinner" aria-hidden="true" />
+      {slow ? (
+        <>
+          <span>Still loading…</span>
+          <button type="button" className="text-btn" onClick={onCancel}>
+            Cancel
+          </button>
+        </>
+      ) : (
+        <span>Loading…</span>
+      )}
+    </div>
+  );
+}
+
+function PlayGlyph() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M8 5v14l11-7z" fill="currentColor" />
+    </svg>
   );
 }
