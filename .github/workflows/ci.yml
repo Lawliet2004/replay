@@ -33,6 +33,12 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libmpv-dev libx11-dev
+      - name: Fetch Windows libmpv
+        if: runner.os == 'Windows'
+        run: |
+          choco install 7zip -y
+          npm ci
+          npm run native:fetch
       - name: fmt
         working-directory: src-tauri
         run: cargo fmt --check

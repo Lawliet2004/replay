@@ -483,16 +483,14 @@ pub fn validate_local_path(raw: &str) -> Result<String, AppError> {
 }
 
 /// Convert a canonical OS path into a form libmpv/FFmpeg accept reliably.
+/// Strips Windows extended-length prefixes; a no-op elsewhere.
 pub fn path_for_mpv(canonical: std::path::PathBuf) -> String {
     let s = canonical.to_string_lossy().into_owned();
-    #[cfg(windows)]
-    {
-        if let Some(rest) = s.strip_prefix(r"\\?\") {
-            if let Some(unc) = rest.strip_prefix(r"UNC\") {
-                return format!(r"\\{unc}");
-            }
-            return rest.to_string();
+    if let Some(rest) = s.strip_prefix(r"\\?\") {
+        if let Some(unc) = rest.strip_prefix(r"UNC\") {
+            return format!(r"\\{unc}");
         }
+        return rest.to_string();
     }
     s
 }
@@ -515,8 +513,8 @@ pub fn is_local_media_uri(path: &str) -> bool {
 }
 
 pub fn redact_path(path: &str) -> String {
-    let p = std::path::Path::new(path);
-    match p.file_name().and_then(|s| s.to_str()) {
+    // Separator-agnostic (Windows paths can appear on any platform in logs/tests).
+    match path.rsplit(['/', '\\']).find(|s| !s.is_empty()) {
         Some(name) => format!("…/{name}"),
         None => "…".to_string(),
     }

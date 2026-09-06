@@ -39,6 +39,7 @@ mod ffi {
     }
 }
 
+#[derive(Debug)]
 pub struct X11VideoHost {
     display: *mut ffi::Display,
     window: ffi::Window,

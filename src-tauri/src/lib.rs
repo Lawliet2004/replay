@@ -153,7 +153,9 @@ fn window_parent(window: &tauri::WebviewWindow) -> ParentSurface {
         #[cfg(all(unix, not(target_os = "macos")))]
         RawWindowHandle::Xlib(h) => ParentSurface {
             wid: h.window as i64,
-            display: h.display.as_ptr() as i64,
+            // raw-window-handle 0.6 dropped the display pointer; the host
+            // opens its own XOpenDisplay connection when this is 0.
+            display: 0,
         },
         #[cfg(all(unix, not(target_os = "macos")))]
         RawWindowHandle::Xcb(h) => ParentSurface {

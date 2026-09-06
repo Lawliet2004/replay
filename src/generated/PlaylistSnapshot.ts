@@ -2,8 +2,4 @@
 import type { MediaItem } from "./MediaItem";
 import type { RepeatMode } from "./RepeatMode";
 
-export type PlaylistSnapshot = {
-  items: Array<MediaItem>;
-  currentIndex: number | null;
-  repeat: RepeatMode;
-};
+export type PlaylistSnapshot = { items: Array<MediaItem>, currentIndex: number | null, repeat: RepeatMode, };

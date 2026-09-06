@@ -26,6 +26,7 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
         .setup(|app, api| {
             #[cfg(target_os = "android")]
             {
+                use tauri::Manager;
                 let handle =
                     api.register_android_plugin("app.replay.media3", "ReplayMedia3Plugin")?;
                 app.manage(PluginApi { handle });
