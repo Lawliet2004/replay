@@ -4,4 +4,9 @@ import type { ErrorCode } from "./ErrorCode";
 /**
  * Stable application error returned across the IPC boundary.
  */
-export type AppError = { code: ErrorCode, message: string, recoverable: boolean, correlationId: string, };
+export type AppError = {
+  code: ErrorCode;
+  message: string;
+  recoverable: boolean;
+  correlationId: string;
+};

@@ -7,4 +7,22 @@ import type { PlaylistSnapshot } from "./PlaylistSnapshot";
 import type { SubtitleStyle } from "./SubtitleStyle";
 import type { Track } from "./Track";
 
-export type PlayerSnapshot = { revision: bigint, loadGeneration: bigint, phase: PlayerPhase, positionSecs: number, durationSecs: number, volume: number, muted: boolean, speed: number, fullscreen: boolean, current: MediaItem | null, playlist: PlaylistSnapshot, audioTracks: Array<Track>, subtitleTracks: Array<Track>, metadata: MediaMetadata | null, subtitleStyle: SubtitleStyle, error: AppError | null, eofReached: boolean, };
+export type PlayerSnapshot = {
+  revision: bigint;
+  loadGeneration: bigint;
+  phase: PlayerPhase;
+  positionSecs: number;
+  durationSecs: number;
+  volume: number;
+  muted: boolean;
+  speed: number;
+  fullscreen: boolean;
+  current: MediaItem | null;
+  playlist: PlaylistSnapshot;
+  audioTracks: Array<Track>;
+  subtitleTracks: Array<Track>;
+  metadata: MediaMetadata | null;
+  subtitleStyle: SubtitleStyle;
+  error: AppError | null;
+  eofReached: boolean;
+};
