@@ -48,6 +48,16 @@ impl PlayerHandle {
     pub fn send(&self, cmd: PlayerCommand) {
         let _ = self.cmd_tx.send(cmd);
     }
+
+    /// Settings persist on the actor thread; a best-effort nudge is all the
+    /// close path needs on Android (no desktop-style inline flush).
+    pub fn flush_now(&self) {
+        // ponytail: no-op — the android actor flushes on each settings write.
+    }
+
+    pub fn flush_blocking(&self, _timeout: std::time::Duration) {
+        // ponytail: no-op — same as flush_now; app exit does not wait.
+    }
 }
 
 pub(crate) struct AndroidPlayerActor {
