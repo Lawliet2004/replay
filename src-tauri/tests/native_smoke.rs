@@ -1,17 +1,13 @@
 //! Native libmpv smoke — run with: cargo test -p replay --test native_smoke -- --ignored --nocapture
+//! Loadfile coverage requires a media path via REPLAY_SMOKE_MEDIA; otherwise it is skipped.
 
 use std::path::PathBuf;
 
 fn sample_media() -> Option<PathBuf> {
-    let candidates = [
-        r"C:\Users\Papan Ghosh\Downloads\Telegram Desktop\Ben 10 Omniverse S04 Ep09.mp4",
-        r"C:\Users\Papan Ghosh\Downloads\Telegram Desktop\Ben 10 Omniverse S04 Ep04.mp4",
-        r"C:\Users\Papan Ghosh\Downloads\Telegram Desktop\Ben 10 Omniverse S04 Ep05.mp4",
-    ];
-    candidates
-        .into_iter()
+    std::env::var("REPLAY_SMOKE_MEDIA")
+        .ok()
         .map(PathBuf::from)
-        .find(|p| p.is_file())
+        .filter(|p| p.is_file())
 }
 
 #[test]

@@ -76,7 +76,7 @@ pub struct AppState {
     pub video_host: Mutex<Option<Box<dyn VideoHost>>>,
     pub latest: Mutex<PlayerSnapshot>,
     pub settings_latest: Mutex<Settings>,
-    pub settings_path: Mutex<PathBuf>,
+    pub settings_dir: Mutex<PathBuf>,
     pub parent_wid: Mutex<i64>,
     pub host_layout: Mutex<HostLayout>,
 }
@@ -89,7 +89,7 @@ impl AppState {
             video_host: Mutex::new(None),
             latest: Mutex::new(PlayerSnapshot::default()),
             settings_latest: Mutex::new(settings),
-            settings_path: Mutex::new(app_data),
+            settings_dir: Mutex::new(app_data),
             parent_wid: Mutex::new(0),
             host_layout: Mutex::new(HostLayout::default()),
         }
@@ -101,7 +101,7 @@ pub fn player_command(
     window: tauri::WebviewWindow,
     state: State<'_, Arc<AppState>>,
     command: PlayerCommand,
-) -> Result<PlayerSnapshot, AppError> {
+) -> Result<(), AppError> {
     // Host HWND/X11 window must be mutated on the UI thread, never the invoke worker.
     if let PlayerCommand::SetHostBounds {
         width,
@@ -143,21 +143,16 @@ pub fn player_command(
             })
             .is_err()
         {
-            apply_host_bounds(
-                &state,
-                width,
-                height,
-                chrome_top,
-                chrome_bottom,
-                chrome_right,
-                cutout,
-            );
+            // Never mutate the host HWND off the UI thread (thread-affinity
+            // deadlocks / torn window state). The frontend re-sends bounds on
+            // the next layout pass anyway.
+            tracing::warn!("set_host_bounds dropped: UI thread unavailable");
         }
     }
 
     if let Some(player) = state.player.lock().as_ref() {
         player.send(command);
-        Ok(state.latest.lock().clone())
+        Ok(())
     } else {
         Err(AppError::new(
             crate::error::ErrorCode::EngineMissing,
@@ -182,7 +177,16 @@ pub fn update_settings(
     state: State<'_, Arc<AppState>>,
     settings: Settings,
 ) -> Result<Settings, AppError> {
-    let normalized = settings.normalized();
+    // Overlay saves can carry stale snapshots of server-owned fields; merge
+    // them from the live persisted state so client-stale values are ignored.
+    let mut normalized = settings.normalized();
+    let live = state.settings_latest.lock().clone();
+    normalized.recent = live.recent;
+    normalized.resume_positions = live.resume_positions;
+    normalized.volume = live.volume;
+    normalized.muted = live.muted;
+    normalized.speed = live.speed;
+    normalized.repeat = live.repeat;
     if let Some(player) = state.player.lock().as_ref() {
         player.send(PlayerCommand::ApplySettings {
             request_id: Uuid::new_v4().to_string(),
@@ -205,38 +209,13 @@ pub fn open_media_paths(
     state: State<'_, Arc<AppState>>,
     paths: Vec<String>,
     replace: bool,
-) -> Result<PlayerSnapshot, AppError> {
+) -> Result<(), AppError> {
     let cmd = PlayerCommand::OpenPaths {
         request_id: Uuid::new_v4().to_string(),
         paths,
         replace,
     };
     player_command(window, state, cmd)
-}
-
-#[tauri::command]
-pub fn export_types() -> Result<(), String> {
-    // Invoked by `cargo test` / build scripts to refresh TS contracts.
-    use crate::error::{AppError, ErrorCode};
-    use crate::player::model::*;
-    use ts_rs::TS;
-
-    MediaItem::export_all().map_err(|e| e.to_string())?;
-    Track::export_all().map_err(|e| e.to_string())?;
-    MediaMetadata::export_all().map_err(|e| e.to_string())?;
-    PlaylistSnapshot::export_all().map_err(|e| e.to_string())?;
-    SubtitleStyle::export_all().map_err(|e| e.to_string())?;
-    PlayerSnapshot::export_all().map_err(|e| e.to_string())?;
-    PlayerCommand::export_all().map_err(|e| e.to_string())?;
-    PlayerEvent::export_all().map_err(|e| e.to_string())?;
-    Settings::export_all().map_err(|e| e.to_string())?;
-    ResumeEntry::export_all().map_err(|e| e.to_string())?;
-    PlayerPhase::export_all().map_err(|e| e.to_string())?;
-    RepeatMode::export_all().map_err(|e| e.to_string())?;
-    TrackKind::export_all().map_err(|e| e.to_string())?;
-    AppError::export_all().map_err(|e| e.to_string())?;
-    ErrorCode::export_all().map_err(|e| e.to_string())?;
-    Ok(())
 }
 
 /// Create the video host on the UI thread, then spawn the libmpv actor with the embed wid.
@@ -260,6 +239,10 @@ pub fn start_player(
         Ok(host) => {
             let wid = host.handle().wid;
             *state.video_host.lock() = Some(host);
+            // Enforce the initial hidden layout before the playback engine attaches
+            // to the native surface. On Windows, attaching mpv first can promote a
+            // black overlay plane that remains over the webview despite SW_HIDE.
+            commit_host_layout(state);
             wid
         }
         Err(err) => {
@@ -282,7 +265,17 @@ pub fn start_player(
     };
 
     let (tx, rx) = mpsc::channel::<PlayerEvent>();
-    let app_data = state.settings_path.lock().clone();
+    let app_data = state.settings_dir.lock().clone();
+    #[cfg(target_os = "android")]
+    let handle = PlayerHandle::spawn(
+        tx,
+        app_data,
+        embed_wid,
+        Box::new(crate::player::android_engine::MobileEngine::new(
+            app.clone(),
+        )),
+    );
+    #[cfg(not(target_os = "android"))]
     let handle = PlayerHandle::spawn(tx, app_data, embed_wid);
     *state.player.lock() = Some(handle);
 

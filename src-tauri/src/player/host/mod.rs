@@ -52,19 +52,30 @@ pub trait VideoHost: Send {
 }
 
 #[cfg(windows)]
+mod close_overlay;
+#[cfg(windows)]
 mod windows;
 #[cfg(windows)]
-pub use windows::{install_activity_hook, uninstall_activity_hook, WindowsVideoHost};
+pub use windows::{
+    install_activity_hook, invalidate_activity_rect, uninstall_activity_hook, WindowsVideoHost,
+};
 
-#[cfg(all(unix, not(target_os = "macos")))]
+#[cfg(all(unix, not(target_os = "macos"), not(target_os = "android")))]
 mod x11;
-#[cfg(all(unix, not(target_os = "macos")))]
+#[cfg(all(unix, not(target_os = "macos"), not(target_os = "android")))]
 pub use x11::X11VideoHost;
 
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "macos")]
 pub use macos::MacosVideoHost;
+
+#[cfg(target_os = "android")]
+mod android;
+#[cfg(target_os = "android")]
+pub use android::install_app_handle as install_android_app;
+#[cfg(target_os = "android")]
+pub use android::AndroidVideoHost;
 
 /// Create the platform-appropriate host attached to a parent native window id.
 pub fn create_host(
@@ -77,7 +88,7 @@ pub fn create_host(
         let host = WindowsVideoHost::create(parent.wid as isize, width, height)?;
         return Ok(Box::new(host));
     }
-    #[cfg(all(unix, not(target_os = "macos")))]
+    #[cfg(all(unix, not(target_os = "macos"), not(target_os = "android")))]
     {
         let host = X11VideoHost::create(parent.wid as u64, parent.display, width, height)?;
         return Ok(Box::new(host));
@@ -85,6 +96,11 @@ pub fn create_host(
     #[cfg(target_os = "macos")]
     {
         let host = MacosVideoHost::create(parent.wid, width, height)?;
+        return Ok(Box::new(host));
+    }
+    #[cfg(target_os = "android")]
+    {
+        let host = AndroidVideoHost::create(parent, width, height)?;
         return Ok(Box::new(host));
     }
     #[allow(unreachable_code)]

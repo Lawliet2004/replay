@@ -22,7 +22,7 @@ describe("chrome auto-hide policy", () => {
     expect(CHROME_HIDE_MS).toBe(1000);
   });
 
-  it("allows hide while paused with idle pointer", () => {
+  it("keeps chrome visible while paused (the only way to resume)", () => {
     expect(
       shouldKeepChromeVisible({
         hasMedia: true,
@@ -30,7 +30,7 @@ describe("chrome auto-hide policy", () => {
         hoveringChrome: false,
         phase: "paused",
       }),
-    ).toBe(false);
+    ).toBe(true);
   });
 
   it("pins chrome while loading or on error", () => {
@@ -63,7 +63,7 @@ describe("chrome auto-hide policy", () => {
     ).toBe(false);
   });
 
-  it("does not pin chrome for an idle pointer over the bars", () => {
+  it("pins chrome while the pointer hovers the bars even when playing", () => {
     expect(
       shouldKeepChromeVisible({
         hasMedia: true,
@@ -71,15 +71,18 @@ describe("chrome auto-hide policy", () => {
         hoveringChrome: true,
         phase: "playing",
       }),
-    ).toBe(false);
+    ).toBe(true);
+  });
+
+  it("pins chrome when playback has ended", () => {
     expect(
       shouldKeepChromeVisible({
         hasMedia: true,
         blockingUi: false,
-        hoveringChrome: true,
-        phase: "paused",
+        hoveringChrome: false,
+        phase: "ended",
       }),
-    ).toBe(false);
+    ).toBe(true);
   });
 
   it("keeps chrome when a drawer is open", () => {

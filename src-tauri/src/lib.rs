@@ -20,7 +20,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
-        .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_replay_media3::init())
         .setup(|app| {
             let resolver = app.path();
             let app_data = resolver
@@ -32,11 +32,15 @@ pub fn run() {
             app.manage(state.clone());
 
             let window = app.get_webview_window("main").expect("main window");
-            // Opaque black webview: sibling HWNDs do not alpha-blend, so a transparent
-            // webview would reveal the desktop — not the video host underneath.
-            // Video renders in an HWND_TOP child above this surface; chrome sits in a
-            // reserved bottom strip (see apply_host_bounds / App.tsx sync).
+            // Windows: opaque webview — sibling HWNDs do not alpha-blend.
+            // Android: transparent webview over a Media3 SurfaceView.
+            #[cfg(not(target_os = "android"))]
             let _ = window.set_background_color(Some(tauri::window::Color(11, 13, 16, 255)));
+            #[cfg(target_os = "android")]
+            {
+                let _ = window.set_background_color(Some(tauri::window::Color(0, 0, 0, 0)));
+                crate::player::host::install_android_app(app.handle().clone());
+            }
 
             let parent = window_parent(&window);
             #[cfg(windows)]
@@ -66,6 +70,16 @@ pub fn run() {
 
             let state_resize = state.clone();
             window.on_window_event(move |event| match event {
+                WindowEvent::CloseRequested { .. } => {
+                    // Best-effort: nudge the actor to flush pending settings
+                    // (volume/mute/repeat/etc.) before the window is torn down.
+                    // Resume positions are already persisted every 5s during
+                    // playback by the actor itself, so this is just for the
+                    // trailing dirty bit.
+                    if let Some(player) = state_resize.player.lock().as_ref() {
+                        player.flush_now();
+                    }
+                }
                 WindowEvent::Destroyed => {
                     tracing::info!("main window destroyed");
                     // Destroy HWND on the UI thread that created it.
@@ -75,7 +89,14 @@ pub fn run() {
                 }
                 WindowEvent::Resized(size) => {
                     tracing::debug!(w = size.width, h = size.height, "main window resized");
+                    #[cfg(windows)]
+                    crate::player::host::invalidate_activity_rect();
                     resize_video_host(&state_resize, size.width, size.height);
+                }
+                WindowEvent::Moved(pos) => {
+                    #[cfg(windows)]
+                    crate::player::host::invalidate_activity_rect();
+                    let _ = pos;
                 }
                 WindowEvent::ScaleFactorChanged {
                     scale_factor,
@@ -101,14 +122,20 @@ pub fn run() {
             ipc::get_settings,
             ipc::update_settings,
             ipc::open_media_paths,
-            ipc::export_types,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Replay");
 
-    app.run(|_app_handle, event| {
+    app.run(|app_handle, event| {
         if let RunEvent::Exit = event {
             tracing::info!("Replay shutting down");
+            // Synchronous exit flush: the async settings writer thread may be
+            // torn down before it drains; persist inline before quitting.
+            if let Some(state) = app_handle.try_state::<Arc<AppState>>() {
+                if let Some(player) = state.player.lock().as_ref() {
+                    player.flush_blocking(std::time::Duration::from_secs(2));
+                }
+            }
         }
     });
 }

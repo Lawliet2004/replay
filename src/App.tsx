@@ -35,11 +35,47 @@ import { useFullscreenClose } from "./features/player/useFullscreenClose";
 import { setPlayerFullscreen } from "./features/player/fullscreen";
 import { getSettings } from "./lib/ipc";
 import type { MediaItem } from "./generated/player";
+import { MEDIA_EXTENSIONS } from "./lib/mediaPicker";
 import { setSeekStepSecs } from "./features/player/seekPrefs";
 import { isFullscreenCloseHit, isSurfaceClickIgnored } from "./features/player/surfaceClick";
 import { detectAppPlatform } from "./lib/platform";
 import { Icon } from "./components/icons";
+import { useToasts } from "./components/useToasts";
+import { subscribeOsd, type OsdMessage } from "./features/player/osdBus";
+import { setDispatchErrorHandler } from "./features/player/store";
 import "./styles/app.css";
+
+const ERROR_COPY: Record<string, string> = {
+  invalid_path: "Invalid file path",
+  url_rejected: "Web links aren't supported — open a local file",
+  file_not_found: "File not found — it may have been moved or deleted",
+  unsupported_media: "Unsupported format — Replay can't play this file",
+  codec_failure: "Couldn't decode this file",
+  engine_missing: "Playback engine unavailable — try restarting the app",
+  engine_init: "Playback engine failed to start — try restarting the app",
+  render_host: "Video surface error — try restarting the app",
+  playlist_bounds: "No track in that direction",
+  settings_corrupt: "Settings file was unreadable and has been reset",
+  command_rejected: "The player rejected that action",
+  internal: "Something went wrong",
+};
+
+function errorHeadline(code: string | undefined): string {
+  return (code && ERROR_COPY[code]) || "Something went wrong";
+}
+
+function osdText(msg: OsdMessage): string {
+  switch (msg.kind) {
+    case "volume":
+      return `Volume ${Math.round(Number(msg.value ?? 0))}%`;
+    case "mute":
+      return "Muted";
+    case "speed":
+      return `${msg.value}×`;
+    default:
+      return String(msg.value ?? "");
+  }
+}
 
 export default function App() {
   const snap = usePlayerSnapshot(
@@ -51,12 +87,15 @@ export default function App() {
     }),
     shallowEqual,
   );
+  const { show: showToast } = useToasts();
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsView, setSettingsView] = useState<SettingsView>("root");
   const settingsViewRef = useRef<SettingsView>("root");
   const [clickFlash, setClickFlash] = useState<PlaybackClickFlash | null>(null);
   /** True while a file drag is hovering over the window. */
   const [isDragOver, setIsDragOver] = useState(false);
+  /** File count of the in-flight drag, for the drop hint pill. */
+  const dragCountRef = useRef(0);
   /** Most recent files, fetched once on mount. */
   const [recents, setRecents] = useState<MediaItem[]>([]);
   /** Tracks the most recently dismissed error so the banner stays hidden
@@ -108,6 +147,45 @@ export default function App() {
     flashTokenRef.current += 1;
     setClickFlash({ kind, token: flashTokenRef.current });
   }, []);
+  /** Paths of the most recent open (for the banner Retry button). */
+  const lastOpenPathsRef = useRef<string[]>([]);
+  const recentsFetchFailedRef = useRef(false);
+
+  // Reduced-motion: the CSS fill-mode animation may be disabled, so clear the
+  // flash explicitly instead of relying on animationend.
+  useEffect(() => {
+    if (!clickFlash) return;
+    const t = window.setTimeout(() => setClickFlash(null), 650);
+    return () => window.clearTimeout(t);
+  }, [clickFlash]);
+
+  // Route store dispatch rejections to toasts (call sites are `void dispatch`).
+  useEffect(() => {
+    setDispatchErrorHandler((err) => {
+      showToast(`Player command failed: ${err instanceof Error ? err.message : String(err)}`, {
+        intent: "error",
+      });
+    });
+    return () => setDispatchErrorHandler(null);
+  }, [showToast]);
+
+  // Recents go stale after playback; re-fetch whenever we return to idle.
+  const loadRecents = useCallback(() => {
+    void getSettings()
+      .then((s) => {
+        setSeekStepSecs(s.seekStepSecs);
+        setRecents(s.recent.slice(0, 6));
+      })
+      .catch(() => {
+        if (!recentsFetchFailedRef.current) {
+          recentsFetchFailedRef.current = true;
+          showToast("Couldn't load recent files", { intent: "error" });
+        }
+      });
+  }, [showToast]);
+  useEffect(() => {
+    if (snap.phase === "idle") loadRecents();
+  }, [snap.phase, loadRecents]);
 
   // Loading: hide the HWND_TOP host so HTML banners are visible.
   // Settings uses a measured overlay hole so video keeps playing around it.
@@ -134,12 +212,6 @@ export default function App() {
 
   useEffect(() => {
     void startPlayerStore();
-    void getSettings()
-      .then((s) => {
-        setSeekStepSecs(s.seekStepSecs);
-        setRecents(s.recent.slice(0, 6));
-      })
-      .catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -184,8 +256,32 @@ export default function App() {
   const openFiles = useCallback(async () => {
     const paths = await pickMediaFiles();
     if (!paths?.length) return;
+    lastOpenPathsRef.current = paths;
     await dispatch({ type: "open_paths", paths, replace: true });
   }, []);
+
+  /** Split dropped paths into playable vs skipped; toast the skips. */
+  const filterDroppedPaths = useCallback(
+    (raw: string[]): { playable: string[]; skipped: number; urls: boolean } => {
+      const urls = raw.filter((p) => p.includes("://"));
+      const rest = raw.filter((p) => !p.includes("://"));
+      const playable = rest.filter((p) => {
+        const ext = p.slice(p.lastIndexOf(".") + 1).toLowerCase();
+        return MEDIA_EXTENSIONS.includes(ext);
+      });
+      const skipped = rest.length - playable.length;
+      if (skipped > 0) {
+        showToast(`Skipped ${skipped} unsupported file${skipped === 1 ? "" : "s"}`, {
+          intent: "info",
+        });
+      }
+      if (rest.length > 0 && playable.length === 0 && urls.length === 0 && skipped > 0) {
+        showToast("No playable files in that drop", { intent: "info" });
+      }
+      return { playable, skipped, urls: urls.length > 0 };
+    },
+    [showToast],
+  );
 
   usePlayerHotkeys({
     onHelp: () => {
@@ -228,23 +324,35 @@ export default function App() {
     const win = getCurrentWindow();
     const un = win.onDragDropEvent((event) => {
       if (event.payload.type === "drop") {
-        const paths = event.payload.paths.filter((p) => !p.includes("://"));
-        if (paths.length) {
-          // Drop APPENDS to the queue so a single file never wipes a long
-          // playlist. Modifier-keyed "replace" is a future enhancement.
-          void dispatch({ type: "open_paths", paths, replace: false });
+        const raw = event.payload.paths;
+        const urlCount = raw.filter((p) => p.includes("://")).length;
+        const localCount = raw.length - urlCount;
+        if (urlCount > 0 && localCount === 0) {
+          showToast("Links aren't supported — drop local files instead", { intent: "info" });
+        } else {
+          const { playable } = filterDroppedPaths(raw);
+          if (playable.length) {
+            // Drop APPENDS to the queue so a single file never wipes a long
+            // playlist. Modifier-keyed "replace" is a future enhancement.
+            void dispatch({ type: "open_paths", paths: playable, replace: false });
+          }
         }
         setIsDragOver(false);
+        dragCountRef.current = 0;
       } else if (event.payload.type === "enter" || event.payload.type === "over") {
+        if (event.payload.type === "enter") {
+          dragCountRef.current = Math.max(dragCountRef.current, event.payload.paths.length);
+        }
         setIsDragOver(true);
       } else if (event.payload.type === "leave") {
         setIsDragOver(false);
+        dragCountRef.current = 0;
       }
     });
     return () => {
       void un.then((f) => f());
     };
-  }, []);
+  }, [showToast, filterDroppedPaths]);
 
   useEffect(() => {
     let raf = 0;
@@ -439,7 +547,7 @@ export default function App() {
       void unSurface.then((f) => f());
       void unCloseFs.then((f) => f());
     };
-  }, []);
+  }, [flashPlayback]);
 
   // Windowed: any motion reveals chrome. Fullscreen: only the top edge shows close.
   useEffect(() => {
@@ -466,6 +574,44 @@ export default function App() {
     };
   }, [hasMedia, chromeVisible, titlebarVisible, snap.fullscreen]);
 
+  // Keyboard focus inside hidden chrome must reveal it (otherwise users tab
+  // into invisible controls).
+  const onChromeFocusCapture = useCallback(() => {
+    if (hasMedia && !snap.fullscreen) bumpRef.current();
+  }, [hasMedia, snap.fullscreen]);
+
+  // Idle hero: put focus on the primary CTA once, when nothing else is focused.
+  const openBtnRef = useRef<HTMLButtonElement | null>(null);
+  const idleFocusDoneRef = useRef(false);
+  useEffect(() => {
+    if (hasMedia || snap.phase === "loading" || errorVisible) {
+      idleFocusDoneRef.current = false;
+      return;
+    }
+    if (idleFocusDoneRef.current) return;
+    idleFocusDoneRef.current = true;
+    const t = window.setTimeout(() => {
+      if (document.activeElement === document.body) {
+        openBtnRef.current?.focus();
+      }
+    }, 50);
+    return () => window.clearTimeout(t);
+  }, [hasMedia, snap.phase, errorVisible]);
+
+  // Escape closes the error banner first, before overlay/fullscreen handlers.
+  const errorVisibleRef = useRef(false);
+  errorVisibleRef.current = errorVisible;
+  useEffect(() => {
+    if (!errorVisible) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && errorVisibleRef.current) {
+        setDismissedErrorId(snap.error?.correlationId ?? null);
+      }
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [errorVisible, snap.error?.correlationId]);
+
   return (
     <div
       className={`app ${snap.fullscreen ? "is-fullscreen" : ""} ${
@@ -481,6 +627,34 @@ export default function App() {
     >
       <div className="video-stage" aria-hidden="true" />
       <PlaybackClickFeedback flash={clickFlash} />
+      <OsdHost />
+
+      {isDragOver && dragCountRef.current > 0 ? (
+        <div
+          style={{
+            position: "absolute",
+            inset: 0,
+            display: "grid",
+            placeItems: "center",
+            zIndex: 40,
+            pointerEvents: "none",
+          }}
+          aria-hidden="true"
+        >
+          <div
+            style={{
+              background: "rgba(8, 10, 14, 0.85)",
+              color: "var(--fg)",
+              padding: "0.5rem 1rem",
+              borderRadius: "999px",
+              fontSize: "0.85rem",
+              fontWeight: 500,
+            }}
+          >
+            Drop to add {dragCountRef.current} file{dragCountRef.current === 1 ? "" : "s"}
+          </div>
+        </div>
+      ) : null}
 
       {!snap.fullscreen ? (
         <TitleBar
@@ -490,15 +664,23 @@ export default function App() {
         />
       ) : null}
 
-      {snap.phase === "idle" && !snap.current && (
+      {!hasMedia && snap.phase !== "loading" && !errorVisible && (
         <div className={`empty-hero ${isDragOver ? "is-drag-over" : ""}`}>
           <div className="brand-lockup">
-            <ReplayLogo size={72} className="brand-logo" title="Replay" />
-            <div className="brand">Replay</div>
+            <ReplayLogo size={56} className="brand-logo" title="Replay" />
+            <span className="welcome-eyebrow">YOUR PERSONAL CINEMA</span>
+            <h1 className="brand">Make time for a good watch.</h1>
           </div>
-          <p>Open a local video or audio file to begin.</p>
-          <button type="button" className="primary" onClick={() => void openFiles()}>
+          <p>Your videos. Your music. Right where you left off.</p>
+          <button
+            type="button"
+            className="primary"
+            ref={openBtnRef}
+            onClick={() => void openFiles()}
+          >
+            <Icon name="plus" />
             Open files
+            <kbd>Ctrl O</kbd>
           </button>
           <p className="hint">
             Drop files here, or press{" "}
@@ -520,20 +702,30 @@ export default function App() {
           </p>
           {recents.length > 0 ? (
             <div className="recents" aria-label="Recent files">
-              <h3 className="recents-title">Recent</h3>
+              <div className="recents-heading">
+                <h2 className="recents-title">Recently opened</h2>
+                <span>{recents.length} files</span>
+              </div>
               <ul className="recents-list">
                 {recents.map((r) => (
                   <li key={r.id}>
                     <button
                       type="button"
                       className="recents-row"
-                      onClick={() =>
-                        void dispatch({ type: "open_paths", paths: [r.path], replace: true })
-                      }
+                      onClick={() => {
+                        lastOpenPathsRef.current = [r.path];
+                        void dispatch({ type: "open_paths", paths: [r.path], replace: true });
+                      }}
                       title={r.path}
                     >
-                      <PlayGlyph />
+                      <span className="recent-file-icon">
+                        <Icon name="play" />
+                      </span>
                       <span className="recents-name">{r.displayName}</span>
+                      <span className="recent-file-type">
+                        {r.displayName.split(".").pop()?.toUpperCase()}
+                      </span>
+                      <Icon name="chevron-right" />
                     </button>
                   </li>
                 ))}
@@ -552,14 +744,31 @@ export default function App() {
       {errorVisible && snap.error ? (
         <div className="error-banner" role="alert">
           <div>
-            <strong>Something went wrong</strong>
+            <strong>{errorHeadline(snap.error.code)}</strong>
             <p>{snap.error.message}</p>
           </div>
           <div className="error-banner-actions">
             {snap.error.recoverable ? (
-              <button type="button" className="text-btn" onClick={() => void openFiles()}>
-                Open another file
-              </button>
+              <>
+                {lastOpenPathsRef.current.length > 0 ? (
+                  <button
+                    type="button"
+                    className="text-btn"
+                    onClick={() =>
+                      void dispatch({
+                        type: "open_paths",
+                        paths: lastOpenPathsRef.current,
+                        replace: true,
+                      })
+                    }
+                  >
+                    Retry
+                  </button>
+                ) : null}
+                <button type="button" className="text-btn" onClick={() => void openFiles()}>
+                  Open another file
+                </button>
+              </>
             ) : null}
             <button
               type="button"
@@ -577,6 +786,8 @@ export default function App() {
         <div
           ref={chromeRef}
           className={`chrome ${windowedChromeVisible ? "visible" : ""}`}
+          inert={!windowedChromeVisible ? true : undefined}
+          onFocusCapture={onChromeFocusCapture}
           onMouseEnter={() => {
             setHoveringChrome(true);
             bumpRef.current();
@@ -649,10 +860,41 @@ function LoadingPill({ onCancel }: { onCancel: () => void }) {
   );
 }
 
-function PlayGlyph() {
+/** Transient on-screen readout (volume/seek/speed) when chrome is hidden. */
+function OsdHost() {
+  const [msg, setMsg] = useState<OsdMessage | null>(null);
+  const [visible, setVisible] = useState(false);
+  useEffect(() => {
+    let hideTimer = 0;
+    return subscribeOsd((m) => {
+      setMsg(m);
+      setVisible(true);
+      window.clearTimeout(hideTimer);
+      hideTimer = window.setTimeout(() => setVisible(false), 900);
+    });
+  }, []);
+  if (!msg) return null;
   return (
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      <path d="M8 5v14l11-7z" fill="currentColor" />
-    </svg>
+    <div
+      aria-live="polite"
+      style={{
+        position: "absolute",
+        bottom: "calc(var(--chrome-reserve, 84px) + 12px)",
+        left: "50%",
+        transform: "translateX(-50%)",
+        background: "rgba(8, 10, 14, 0.85)",
+        color: "var(--fg)",
+        padding: "0.35rem 0.85rem",
+        borderRadius: "999px",
+        fontSize: "0.85rem",
+        fontWeight: 500,
+        zIndex: 35,
+        pointerEvents: "none",
+        opacity: visible ? 1 : 0,
+        transition: "opacity 150ms ease-out",
+      }}
+    >
+      {osdText(msg)}
+    </div>
   );
 }

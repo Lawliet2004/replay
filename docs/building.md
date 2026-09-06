@@ -6,6 +6,7 @@
 - Rust stable (1.77+)
 - Tauri 2 system deps ([prerequisites](https://v2.tauri.app/start/prerequisites/))
 - Windows: MSVC Build Tools (Desktop development with C++), WebView2, 7-Zip (for `native:fetch`)
+- Android: JDK 17, Android SDK/NDK, and `rustup target add aarch64-linux-android`
 
 ## Steps
 
@@ -17,6 +18,17 @@ npm run tauri:build
 ```
 
 Set `REPLAY_LIBMPV_PATH` to override the libmpv DLL/shared library path.
+
+## Android
+
+One-time project init, then APK:
+
+```bash
+npm run tauri android init
+npx tauri android build --apk
+```
+
+Android playback is Media3 / ExoPlayer, not libmpv — `native:fetch` is not required.
 
 ## Linux notes
 

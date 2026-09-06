@@ -281,7 +281,8 @@ impl AndroidPlayerActor {
                 self.emit_snapshot();
             }
             AndroidEngineCall::RemoveSubtitle { track_id } => {
-                self.engine.apply(&AndroidEngineCall::RemoveSubtitle { track_id })?;
+                self.engine
+                    .apply(&AndroidEngineCall::RemoveSubtitle { track_id })?;
                 self.emit_snapshot();
             }
             AndroidEngineCall::Playlist => self.dispatch_playlist(cmd)?,
@@ -408,8 +409,14 @@ impl AndroidPlayerActor {
 
     fn apply_settings(&mut self, incoming: Settings) -> Result<(), AppError> {
         let mut next = incoming.normalized();
+        // Server-owned fields: merge from the live persisted state so a stale
+        // overlay snapshot cannot clobber them.
         next.recent = self.settings.get().recent.clone();
         next.resume_positions = self.settings.get().resume_positions.clone();
+        next.volume = self.settings.get().volume;
+        next.muted = self.settings.get().muted;
+        next.speed = self.settings.get().speed;
+        next.repeat = self.settings.get().repeat;
         self.playlist.set_repeat(next.repeat);
         self.snapshot.volume = next.volume;
         self.snapshot.muted = next.muted;

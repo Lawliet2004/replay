@@ -6,7 +6,7 @@
 
 use crate::error::{AppError, ErrorCode};
 use crate::player::model::{
-    MediaMetadata, PlayerCommand, PlayerEvent, PlayerPhase, PlayerSnapshot, Settings,
+    MediaMetadata, PlayerCommand, PlayerEvent, PlayerPhase, PlayerSnapshot, RepeatMode, Settings,
     SubtitleStyle, Track, TrackKind, POSITION_SAMPLE_HZ,
 };
 use crate::player::mpv::{Mpv, MpvClientEvent};
@@ -19,12 +19,14 @@ use std::time::{Duration, Instant};
 
 pub struct PlayerHandle {
     cmd_tx: Sender<PlayerCommand>,
+    sync_tx: Sender<Sender<()>>,
     _join: JoinHandle<()>,
 }
 
 impl PlayerHandle {
     pub fn spawn(event_tx: Sender<PlayerEvent>, app_data: PathBuf, embed_wid: i64) -> Self {
         let (cmd_tx, cmd_rx) = mpsc::channel();
+        let (sync_tx, sync_rx) = mpsc::channel::<Sender<()>>();
         let join = thread::Builder::new()
             .name("replay-player".into())
             .spawn(move || {
@@ -45,17 +47,37 @@ impl PlayerHandle {
                         return;
                     }
                 };
-                actor.run(cmd_rx);
+                actor.run(cmd_rx, sync_rx);
             })
             .expect("spawn player actor");
         Self {
             cmd_tx,
+            sync_tx,
             _join: join,
         }
     }
 
     pub fn send(&self, cmd: PlayerCommand) {
         let _ = self.cmd_tx.send(cmd);
+    }
+
+    /// Best-effort flush of pending settings before the window is torn down.
+    /// The actor handles this in its main loop; we don't block here because
+    /// the close path is on the UI thread.
+    pub fn flush_now(&self) {
+        let _ = self.cmd_tx.send(PlayerCommand::FlushNow {
+            request_id: uuid::Uuid::new_v4().to_string(),
+        });
+    }
+
+    /// Synchronous exit-path flush: blocks until the actor has persisted
+    /// pending settings inline, or `timeout` elapses (a wedged actor must
+    /// not hang app exit).
+    pub fn flush_blocking(&self, timeout: Duration) {
+        let (ack_tx, ack_rx) = mpsc::channel();
+        if self.sync_tx.send(ack_tx).is_ok() {
+            let _ = ack_rx.recv_timeout(timeout);
+        }
     }
 }
 
@@ -94,6 +116,7 @@ struct PlayerActor {
     last_position_emit: Instant,
     settings_dirty: bool,
     last_settings_save: Instant,
+    last_resume_save: Instant,
     hw_retried: bool,
 }
 
@@ -156,11 +179,12 @@ impl PlayerActor {
             last_position_emit: Instant::now() - Duration::from_secs(1),
             settings_dirty: false,
             last_settings_save: Instant::now(),
+            last_resume_save: Instant::now() - Duration::from_secs(5),
             hw_retried: false,
         })
     }
 
-    fn run(&mut self, cmd_rx: Receiver<PlayerCommand>) {
+    fn run(&mut self, cmd_rx: Receiver<PlayerCommand>, sync_rx: Receiver<Sender<()>>) {
         loop {
             loop {
                 match cmd_rx.try_recv() {
@@ -171,6 +195,13 @@ impl PlayerActor {
                         return;
                     }
                 }
+            }
+            // Exit-path flush request: persist inline and ack so the caller
+            // can proceed knowing settings are on disk.
+            if let Ok(ack) = sync_rx.try_recv() {
+                self.persist_resume();
+                self.flush_settings();
+                let _ = ack.send(());
             }
 
             // Block up to 50ms for an mpv event (replaces a 125 Hz sleep).
@@ -196,6 +227,7 @@ impl PlayerActor {
             }
 
             self.sample_position_if_due();
+            self.maybe_save_resume();
             self.maybe_flush_settings();
         }
     }
@@ -208,6 +240,33 @@ impl PlayerActor {
         if self.settings_dirty && self.last_settings_save.elapsed() >= Duration::from_millis(400) {
             self.flush_settings();
         }
+    }
+
+    /// Periodically (every ~5s) persist the current playback position so a
+    /// normal "open → watch → close" session restores on next open. Without
+    /// this, resume only triggers when the user explicitly switches files.
+    fn maybe_save_resume(&mut self) {
+        const RESUME_SAVE_INTERVAL: Duration = Duration::from_secs(5);
+        if self.last_resume_save.elapsed() < RESUME_SAVE_INTERVAL {
+            return;
+        }
+        if !self.settings.get().resume_enabled {
+            return;
+        }
+        if self.snapshot.position_secs < 5.0 {
+            return;
+        }
+        if self.snapshot.current.is_none() {
+            return;
+        }
+        if !matches!(
+            self.snapshot.phase,
+            PlayerPhase::Playing | PlayerPhase::Paused
+        ) {
+            return;
+        }
+        self.persist_resume();
+        self.last_resume_save = Instant::now();
     }
 
     fn flush_settings(&mut self) {
@@ -383,6 +442,12 @@ impl PlayerActor {
             PlayerCommand::SetRepeat { mode, .. } => {
                 self.playlist.set_repeat(mode);
                 self.settings.get_mut().repeat = mode;
+                // Use mpv's `loop-file` for "One" so a short clip doesn't blink
+                // (no reload). Clear it when the mode is anything else.
+                let loop_inf = matches!(mode, RepeatMode::One);
+                let _ = self
+                    .mpv
+                    .set_string("loop-file", if loop_inf { "inf" } else { "no" });
                 self.mark_settings_dirty();
                 self.emit_snapshot();
             }
@@ -406,6 +471,12 @@ impl PlayerActor {
             PlayerCommand::AddSubtitle { path, .. } => {
                 let path = crate::player::model::validate_local_path(&path)?;
                 self.mpv.add_sub(&path)?;
+                self.refresh_tracks();
+                self.emit_snapshot();
+            }
+            PlayerCommand::RemoveSubtitle { track_id, .. } => {
+                // mpv accepts a numeric id as the second arg.
+                self.mpv.command(&["sub-remove", &track_id.to_string()])?;
                 self.refresh_tracks();
                 self.emit_snapshot();
             }
@@ -450,6 +521,16 @@ impl PlayerActor {
             PlayerCommand::ApplySettings { settings, .. } => {
                 self.apply_settings(settings)?;
             }
+            PlayerCommand::FlushNow { .. } => {
+                // Save resume position with the current snapshot, then persist
+                // synchronously — the close/exit path must not race the async
+                // writer thread teardown.
+                self.persist_resume();
+                self.settings_dirty = false;
+                if let Err(err) = self.settings.save_sync() {
+                    tracing::warn!(error = %err.message, "exit flush failed");
+                }
+            }
         }
         Ok(())
     }
@@ -462,9 +543,14 @@ impl PlayerActor {
 
     fn apply_settings(&mut self, incoming: Settings) -> Result<(), AppError> {
         let mut next = incoming.normalized();
-        // Recents / resume positions are actor-owned; overlay prefs must not clobber them.
+        // Server-owned fields: merge from the live persisted state so a stale
+        // overlay snapshot cannot clobber them.
         next.recent = self.settings.get().recent.clone();
         next.resume_positions = self.settings.get().resume_positions.clone();
+        next.volume = self.settings.get().volume;
+        next.muted = self.settings.get().muted;
+        next.speed = self.settings.get().speed;
+        next.repeat = self.settings.get().repeat;
 
         if let Err(e) = self.mpv.set_volume(next.volume) {
             tracing::warn!(error = %e.message, "apply_settings volume failed");
@@ -570,7 +656,12 @@ impl PlayerActor {
                 if reason == 0 {
                     self.snapshot.eof_reached = true;
                     self.persist_resume_clear();
-                    if self.settings.get().autoplay_next {
+                    // Repeat: any non-Off mode also advances (wraps to start
+                    // for `All`, repeats the same track for `One`).
+                    // Autoplay: when no repeat is set, the user must opt in
+                    // to advancing to the next file.
+                    let repeat = self.playlist.repeat();
+                    if repeat != RepeatMode::Off || self.settings.get().autoplay_next {
                         if let Some(item) = self.playlist.advance_next().cloned() {
                             let _ = self.load_current(&item.path);
                             return;

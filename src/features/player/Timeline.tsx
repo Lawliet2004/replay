@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
-import { interpolatePosition } from "./time";
-import { dispatch, usePlayerSnapshot } from "./store";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { formatTime, interpolatePosition } from "./time";
+import { dispatch, shallowEqual, usePlayerSnapshot } from "./store";
 
 /** Ignore stale backend samples until they land near the seek target. */
 const SEEK_CATCHUP_SECS = 0.4;
@@ -8,22 +8,44 @@ const SEEK_CATCHUP_SECS = 0.4;
 const SEEK_HOLD_MS = 1500;
 
 export function Timeline() {
-  const snap = usePlayerSnapshot();
+  const snap = usePlayerSnapshot(
+    (s) => ({
+      positionSecs: s.positionSecs,
+      durationSecs: s.durationSecs,
+      phase: s.phase,
+      revision: s.revision,
+      speed: s.speed,
+    }),
+    shallowEqual,
+  );
   const sampleAt = useRef(performance.now());
   const lastSample = useRef(snap.positionSecs);
-  const displayRef = useRef(snap.positionSecs);
-  const [display, setDisplay] = useState(snap.positionSecs);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  const wrapRef = useRef<HTMLDivElement | null>(null);
+  const durationRef = useRef(snap.durationSecs);
   const [dragging, setDragging] = useState(false);
-  const [dragValue, setDragValue] = useState(0);
   /** Optimistic position after click/scrub until backend catches up. */
   const pendingSeek = useRef<number | null>(null);
   const pendingSince = useRef(0);
   const draggingRef = useRef(false);
+  /** Hover tooltip: pointer X (px within the track) and the time under it. */
+  const [hoverX, setHoverX] = useState<number | null>(null);
+
+  durationRef.current = snap.durationSecs;
 
   const commitDisplay = useCallback((secs: number) => {
-    displayRef.current = secs;
-    setDisplay(secs);
+    const input = inputRef.current;
+    if (!input) return;
+
+    const max = Math.max(durationRef.current || 0, 0.1);
+    const value = Math.min(Math.max(0, secs), max);
+    input.value = String(value);
+    input.style.setProperty("--range-progress", `${(value / max) * 100}%`);
+    input.setAttribute("aria-valuetext", formatTime(value));
   }, []);
+
+  const phaseRef = useRef(snap.phase);
+  phaseRef.current = snap.phase;
 
   const acceptBackendSample = useCallback(
     (secs: number) => {
@@ -31,13 +53,23 @@ export function Timeline() {
 
       const pending = pendingSeek.current;
       if (pending != null) {
-        const age = performance.now() - pendingSince.current;
-        const close = Math.abs(secs - pending) <= SEEK_CATCHUP_SECS;
-        if (!close && age < SEEK_HOLD_MS) {
-          // Stale sample from before the seek — keep thumb on target.
-          return;
+        // Seeking/buffering can still report a pre-seek sample. Keep the
+        // optimistic target until mpv catches up or the seek times out.
+        const phase = phaseRef.current;
+        const seekInterrupted = phase !== "playing" && phase !== "seeking" && phase !== "buffering";
+        if (seekInterrupted) {
+          // Pausing / ending / erroring freezes the timeline: any in-flight
+          // seek has effectively been interrupted, so snap to truth.
+          pendingSeek.current = null;
+        } else {
+          const age = performance.now() - pendingSince.current;
+          const close = Math.abs(secs - pending) <= SEEK_CATCHUP_SECS;
+          if (!close && age < SEEK_HOLD_MS) {
+            // Stale sample from before the seek — keep thumb on target.
+            return;
+          }
+          pendingSeek.current = null;
         }
-        pendingSeek.current = null;
       }
 
       lastSample.current = secs;
@@ -78,7 +110,7 @@ export function Timeline() {
     draggingRef.current = true;
     pendingSeek.current = null;
     setDragging(true);
-    setDragValue(current);
+    commitDisplay(current);
   };
 
   const finishSeek = (v: number) => {
@@ -99,21 +131,50 @@ export function Timeline() {
     });
   };
 
-  const value = dragging ? dragValue : display;
   const max = Math.max(snap.durationSecs || 0, 0.1);
-  const progress = max > 0 ? (Math.min(value, max) / max) * 100 : 0;
+
+  const pointerTime = (clientX: number): { x: number; t: number } | null => {
+    const el = wrapRef.current;
+    if (!el) return null;
+    const rect = el.getBoundingClientRect();
+    if (rect.width <= 0) return null;
+    const x = Math.min(Math.max(clientX - rect.left, 0), rect.width);
+    return { x, t: (x / rect.width) * max };
+  };
 
   return (
-    <div className="timeline">
+    <div
+      className="timeline"
+      ref={wrapRef}
+      onPointerMove={(e) => {
+        const p = pointerTime(e.clientX);
+        setHoverX(p ? p.x : null);
+      }}
+      onPointerLeave={() => setHoverX(null)}
+    >
+      {hoverX != null ? (
+        <div
+          className="timeline-tooltip"
+          style={{ left: `${hoverX}px` }}
+          role="presentation"
+          aria-hidden="true"
+        >
+          {formatTime(
+            draggingRef.current && pendingSeek.current != null
+              ? pendingSeek.current
+              : (hoverX / Math.max(wrapRef.current?.clientWidth ?? 1, 1)) * max,
+          )}
+        </div>
+      ) : null}
       <input
+        ref={inputRef}
         className="timeline-range"
         type="range"
         min={0}
         max={max}
-        step={0.01}
-        value={Math.min(value, max)}
+        step={1}
+        defaultValue={Math.min(snap.positionSecs, max)}
         aria-label="Seek"
-        style={{ ["--range-progress" as string]: `${progress}%` } as CSSProperties}
         onPointerDown={(e) => {
           const el = e.currentTarget;
           // Capture so drag stays smooth if pointer leaves the thumb.
@@ -136,9 +197,14 @@ export function Timeline() {
         }}
         onChange={(e) => {
           const v = Number(e.target.value);
-          setDragValue(v);
-          // Live visual while scrubbing (no backend spam).
-          if (draggingRef.current) commitDisplay(v);
+          if (draggingRef.current) {
+            // Live visual while scrubbing (no backend spam).
+            commitDisplay(v);
+            return;
+          }
+          // Keyboard arrows (native range change without pointer drag).
+          commitDisplay(v);
+          finishSeek(v);
         }}
       />
     </div>

@@ -24,14 +24,11 @@ pub enum ErrorCode {
     CodecFailure,
     EngineMissing,
     EngineInit,
-    HardwareDecode,
-    AudioDevice,
     RenderHost,
     PlaylistBounds,
     SettingsCorrupt,
     CommandRejected,
     Internal,
-    PanicRecovered,
 }
 
 impl AppError {
@@ -42,11 +39,6 @@ impl AppError {
             recoverable,
             correlation_id: Uuid::new_v4().to_string(),
         }
-    }
-
-    pub fn with_correlation(mut self, id: impl Into<String>) -> Self {
-        self.correlation_id = id.into();
-        self
     }
 }
 

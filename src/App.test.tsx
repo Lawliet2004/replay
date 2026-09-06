@@ -47,14 +47,21 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
 
 vi.mock("./lib/mediaPicker", () => ({
   pickMediaFiles: vi.fn(),
+  MEDIA_EXTENSIONS: ["mp4", "mkv", "webm", "avi", "mov", "mp3", "flac"],
 }));
 
 vi.mock("./features/player/store", () => ({
   dispatch: vi.fn(),
   startPlayerStore: vi.fn(),
+  setDispatchErrorHandler: vi.fn(),
   shallowEqual: () => false,
   usePlayerSnapshot: (select?: (s: typeof snapshot) => unknown) =>
     select ? select(snapshot) : snapshot,
+}));
+
+vi.mock("./features/player/osdBus", () => ({
+  showOsd: vi.fn(),
+  subscribeOsd: () => () => {},
 }));
 
 vi.mock("./features/player/fullscreen", () => ({
@@ -139,6 +146,7 @@ describe("windowed vs fullscreen chrome", () => {
 
   it("opens settings popup without breaking player layout", async () => {
     render(<App />);
+    expect(document.querySelector(".app")?.getAttribute("data-platform")).toBe("desktop");
     const settingsBtn = screen.getByRole("button", { name: "Settings" });
     expect(settingsBtn).toBeInTheDocument();
 

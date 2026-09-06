@@ -25,6 +25,8 @@ vi.mock("../../lib/mediaPicker", () => ({
 
 describe("PlaylistPanel", () => {
   beforeEach(() => {
+    // jsdom does not implement scrollIntoView; the panel scrolls the active row.
+    Element.prototype.scrollIntoView = () => {};
     vi.mocked(dispatch).mockReset();
     snapshot.playlist = { items: [], currentIndex: null, repeat: "off" };
   });
@@ -123,5 +125,117 @@ describe("PlaylistPanel", () => {
     // The Clear queue button is not visible when the list is empty (the empty
     // state replaces the list+footer), so it is simply absent.
     expect(screen.queryByRole("button", { name: /Clear queue/i })).toBeNull();
+  });
+
+  const twoItems = () => {
+    snapshot.playlist = {
+      items: [
+        {
+          id: "a",
+          path: "/a.mp4",
+          displayName: "a.mp4",
+          durationSecs: 100,
+          lastPositionSecs: null,
+        },
+        {
+          id: "b",
+          path: "/b.mkv",
+          displayName: "b.mkv",
+          durationSecs: null,
+          lastPositionSecs: null,
+        },
+      ],
+      currentIndex: 0,
+      repeat: "off",
+    };
+  };
+
+  it("ArrowDown moves focus to the next row's play button", async () => {
+    twoItems();
+    const user = userEvent.setup();
+    render(
+      <ToastProvider>
+        <PlaylistPanel />
+      </ToastProvider>,
+    );
+    const rows = screen.getAllByRole("button").filter((b) => b.className.includes("playlist-item"));
+    rows[0].focus();
+    expect(document.activeElement).toBe(rows[0]);
+    await user.keyboard("{ArrowDown}");
+    expect(document.activeElement).toBe(rows[1]);
+    // Clamp at the end.
+    await user.keyboard("{ArrowDown}");
+    expect(document.activeElement).toBe(rows[1]);
+    await user.keyboard("{Home}");
+    expect(document.activeElement).toBe(rows[0]);
+    await user.keyboard("{End}");
+    expect(document.activeElement).toBe(rows[1]);
+  });
+
+  it("Delete on a focused row dispatches remove_playlist_item", async () => {
+    twoItems();
+    const user = userEvent.setup();
+    render(
+      <ToastProvider>
+        <PlaylistPanel />
+      </ToastProvider>,
+    );
+    const rows = screen.getAllByRole("button").filter((b) => b.className.includes("playlist-item"));
+    rows[0].focus();
+    await user.keyboard("{Delete}");
+    expect(dispatch).toHaveBeenCalledWith(
+      expect.objectContaining({ type: "remove_playlist_item", index: 0 }),
+    );
+    const toast = await screen.findByText(/Removed a\.mp4/i);
+    expect(toast).toBeInTheDocument();
+  });
+
+  it("renders the remove (✕) button on the hovered row only", async () => {
+    twoItems();
+    render(
+      <ToastProvider>
+        <PlaylistPanel />
+      </ToastProvider>,
+    );
+    // Not in the DOM until the row is hovered (overflow-menu design contract).
+    expect(screen.queryByRole("button", { name: "Remove a.mp4" })).not.toBeInTheDocument();
+    await userEvent.setup().hover(screen.getByRole("button", { name: "Play a.mp4" }));
+    expect(await screen.findByRole("button", { name: "Remove a.mp4" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Remove b.mkv" })).not.toBeInTheDocument();
+  });
+
+  it("shows the footer summary with count and total duration", () => {
+    twoItems();
+    render(
+      <ToastProvider>
+        <PlaylistPanel />
+      </ToastProvider>,
+    );
+    expect(screen.getByText(/2 items · 1:40/)).toBeInTheDocument();
+  });
+
+  it("renders a file-type badge and – placeholder for missing duration", () => {
+    twoItems();
+    render(
+      <ToastProvider>
+        <PlaylistPanel />
+      </ToastProvider>,
+    );
+    expect(screen.getByText("MP4")).toBeInTheDocument();
+    expect(screen.getByText("MKV")).toBeInTheDocument();
+    expect(screen.getByText("–")).toBeInTheDocument();
+  });
+
+  it("marks the active row with aria-current", () => {
+    twoItems();
+    render(
+      <ToastProvider>
+        <PlaylistPanel />
+      </ToastProvider>,
+    );
+    const activeRow = screen.getByText("a.mp4").closest("li");
+    expect(activeRow).toHaveAttribute("aria-current", "true");
+    const otherRow = screen.getByText("b.mkv").closest("li");
+    expect(otherRow).not.toHaveAttribute("aria-current");
   });
 });

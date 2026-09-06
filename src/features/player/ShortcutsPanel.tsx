@@ -1,28 +1,29 @@
-const SHORTCUTS: Array<{ keys: string; action: string }> = [
-  { keys: "Click video", action: "Play / Pause" },
-  { keys: "Space / K", action: "Play / Pause" },
-  { keys: "J / L", action: "Seek by step (Settings)" },
-  { keys: "← / →", action: "Seek by step · hold to accelerate" },
-  { keys: "↑ / ↓", action: "Volume ±5" },
-  { keys: "M", action: "Mute" },
-  { keys: "F", action: "Fullscreen" },
-  { keys: "N / P", action: "Next / Previous" },
-  { keys: "O", action: "Open files" },
-  { keys: ",", action: "Seek −0.04s (frame)" },
-  { keys: ".", action: "Seek +0.04s (frame)" },
-  { keys: "?", action: "Toggle shortcuts help" },
-  { keys: "Esc", action: "Exit fullscreen / close panels" },
-];
+import { SHORTCUTS } from "./useHotkeys";
 
 export function ShortcutsPanel() {
+  const groups: string[] = [];
+  for (const s of SHORTCUTS) {
+    if (!groups.includes(s.group)) groups.push(s.group);
+  }
   return (
-    <ul className="shortcut-list">
-      {SHORTCUTS.map((s) => (
-        <li key={s.keys}>
-          <kbd>{s.keys}</kbd>
-          <span>{s.action}</span>
-        </li>
+    <div className="shortcut-groups">
+      {groups.map((group) => (
+        <div key={group}>
+          <h3 className="settings-section">{group}</h3>
+          <ul className="shortcut-list">
+            {SHORTCUTS.filter((s) => s.group === group).map((s) => (
+              <li key={s.key}>
+                <span className="shortcut-keys">
+                  {s.key.split(" / ").map((key) => (
+                    <kbd key={key}>{key}</kbd>
+                  ))}
+                </span>
+                <span className="shortcut-action">{s.label}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
       ))}
-    </ul>
+    </div>
   );
 }

@@ -20,8 +20,7 @@
     "core:window:allow-start-dragging",
     "core:event:default",
     "dialog:default",
-    "fs:allow-read-file",
-    "fs:allow-exists",
-    "opener:default"
+    "opener:default",
+    "replay-media3:default"
   ]
 }

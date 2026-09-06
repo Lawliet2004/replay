@@ -1,6 +1,8 @@
 import { forwardRef, useCallback, useEffect, useState, type MouseEvent } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { ReplayLogo } from "../../assets/ReplayLogo";
+import { Icon } from "../../components/icons";
+import { useToasts } from "../../components/useToasts";
 
 /** Custom transparent title bar — visible with chrome, never in fullscreen. */
 export const TitleBar = forwardRef<
@@ -8,6 +10,19 @@ export const TitleBar = forwardRef<
   { visible: boolean; mediaTitle?: string | null }
 >(function TitleBar({ visible, mediaTitle }, ref) {
   const [maximized, setMaximized] = useState(false);
+  const { show } = useToasts();
+  const runWindowAction = useCallback(
+    async (action: "minimize" | "toggleMaximize" | "close" | "startDragging") => {
+      try {
+        const win = getCurrentWindow();
+        await win[action]();
+        if (action === "toggleMaximize") setMaximized(await win.isMaximized());
+      } catch {
+        show("Couldn't update the window. Please try again.", { intent: "error" });
+      }
+    },
+    [show],
+  );
 
   useEffect(() => {
     const win = getCurrentWindow();
@@ -24,96 +39,72 @@ export const TitleBar = forwardRef<
     const un = win.onResized(() => void sync());
     return () => {
       cancelled = true;
-      void un.then((f) => f());
+      void un.then((f) => f()).catch(() => {});
     };
   }, []);
 
-  const onDrag = useCallback((e: MouseEvent) => {
-    if (e.buttons !== 1) return;
-    const win = getCurrentWindow();
-    if (e.detail === 2) {
-      void win.toggleMaximize();
-      return;
-    }
-    void win.startDragging();
-  }, []);
+  const onDrag = useCallback(
+    (e: MouseEvent) => {
+      if (e.buttons !== 1) return;
+      if (e.detail === 2) {
+        void runWindowAction("toggleMaximize");
+        return;
+      }
+      void runWindowAction("startDragging");
+    },
+    [runWindowAction],
+  );
 
   return (
     <div
       ref={ref}
       className={`titlebar ${visible ? "visible" : ""}`}
-      onMouseDown={onDrag}
       role="banner"
-      aria-hidden={!visible}
+      // Don't aria-hide the whole bar; the window controls inside stay
+      // keyboard-reachable while the bar is visually hidden (windowed). In
+      // fullscreen the TitleBar is unmounted entirely.
     >
-      <div className="titlebar-brand">
-        <span className="titlebar-mark" aria-hidden="true">
-          <ReplayLogo size={18} className="titlebar-logo" />
-        </span>
-        <span className="titlebar-name">Replay</span>
-        {mediaTitle ? (
-          <span className="titlebar-media" title={mediaTitle}>
-            {mediaTitle}
+      <div className="titlebar-drag" onMouseDown={onDrag} aria-hidden={!visible}>
+        <div className="titlebar-brand">
+          <span className="titlebar-mark" aria-hidden="true">
+            <ReplayLogo size={18} className="titlebar-logo" />
           </span>
-        ) : null}
+          <span className="titlebar-name">Replay</span>
+          {mediaTitle ? (
+            <span className="titlebar-media" title={mediaTitle}>
+              {mediaTitle}
+            </span>
+          ) : null}
+        </div>
+        <div className="titlebar-spacer" />
       </div>
-      <div className="titlebar-spacer" />
       <div className="titlebar-controls" onMouseDown={(e) => e.stopPropagation()}>
         <button
           type="button"
           className="titlebar-btn"
           aria-label="Minimize"
-          onClick={() => void getCurrentWindow().minimize()}
+          title="Minimize"
+          onClick={() => void runWindowAction("minimize")}
         >
-          <svg viewBox="0 0 12 12" aria-hidden="true">
-            <path d="M1.75 6h8.5" stroke="currentColor" strokeWidth="1.15" strokeLinecap="round" />
-          </svg>
+          <Icon name="minus" size="sm" />
         </button>
         <button
           type="button"
           className="titlebar-btn"
           aria-label={maximized ? "Restore" : "Maximize"}
-          onClick={() => void getCurrentWindow().toggleMaximize()}
+          title={maximized ? "Restore window" : "Maximize"}
+          onClick={() => void runWindowAction("toggleMaximize")}
         >
-          {maximized ? (
-            <svg viewBox="0 0 12 12" aria-hidden="true">
-              <path
-                d="M3.25 4.25h4.5v4.5h-4.5zM4.5 3h4.5v1.25M9 3v4.5h-1.25"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.1"
-                strokeLinejoin="round"
-              />
-            </svg>
-          ) : (
-            <svg viewBox="0 0 12 12" aria-hidden="true">
-              <rect
-                x="2.35"
-                y="2.35"
-                width="7.3"
-                height="7.3"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.15"
-                strokeLinejoin="round"
-              />
-            </svg>
-          )}
+          {maximized ? <Icon name="restore" size="sm" /> : <Icon name="maximize" size="sm" />}
         </button>
         <button
           type="button"
           className="titlebar-btn titlebar-btn-close"
           aria-label="Close"
-          onClick={() => void getCurrentWindow().close()}
+          title="Close Replay"
+          onClick={() => void runWindowAction("close")}
         >
-          <svg viewBox="0 0 12 12" aria-hidden="true">
-            <path
-              d="M2.75 2.75l6.5 6.5M9.25 2.75l-6.5 6.5"
-              stroke="currentColor"
-              strokeWidth="1.15"
-              strokeLinecap="round"
-            />
-          </svg>
+          <Icon name="close" size="sm" />
         </button>
       </div>
     </div>

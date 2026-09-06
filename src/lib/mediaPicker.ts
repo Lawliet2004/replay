@@ -8,6 +8,11 @@ export const MEDIA_EXTENSIONS = [
   "avi",
   "mov",
   "m4v",
+  "wmv",
+  "ts",
+  "mts",
+  "m2ts",
+  "flv",
   "mp3",
   "flac",
   "opus",
@@ -15,6 +20,7 @@ export const MEDIA_EXTENSIONS = [
   "aac",
   "m4a",
   "ogg",
+  "wma",
 ];
 
 export async function pickMediaFiles(): Promise<string[] | null> {

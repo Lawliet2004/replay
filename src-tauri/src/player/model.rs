@@ -251,6 +251,12 @@ pub enum PlayerCommand {
         request_id: String,
         path: String,
     },
+    /// Remove an external subtitle track by its mpv-assigned id.
+    /// (Backend maps this to `sub-remove <id>`.)
+    RemoveSubtitle {
+        request_id: String,
+        track_id: i64,
+    },
     SetSubtitleStyle {
         request_id: String,
         style: SubtitleStyle,
@@ -276,6 +282,12 @@ pub enum PlayerCommand {
         settings: Settings,
     },
     GetSnapshot {
+        request_id: String,
+    },
+    /// Internal: ask the actor to flush pending settings (resume position,
+    /// volume, mute, etc.) to disk without waiting for the periodic timer.
+    /// Not exposed via JS; sent from the Tauri close handler.
+    FlushNow {
         request_id: String,
     },
 }
@@ -312,7 +324,7 @@ pub enum PlayerEvent {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
 #[ts(export, export_to = "../../src/generated/")]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", default)]
 pub struct Settings {
     pub version: u32,
     pub volume: f64,
@@ -419,13 +431,15 @@ impl PlayerCommand {
             | Self::SetRepeat { request_id, .. }
             | Self::SelectTrack { request_id, .. }
             | Self::AddSubtitle { request_id, .. }
+            | Self::RemoveSubtitle { request_id, .. }
             | Self::SetSubtitleStyle { request_id, .. }
             | Self::ClearPlaylist { request_id }
             | Self::RemovePlaylistItem { request_id, .. }
             | Self::PlayIndex { request_id, .. }
             | Self::ReorderPlaylist { request_id, .. }
             | Self::ApplySettings { request_id, .. }
-            | Self::GetSnapshot { request_id } => request_id,
+            | Self::GetSnapshot { request_id }
+            | Self::FlushNow { request_id } => request_id,
         }
     }
 }
@@ -438,6 +452,9 @@ pub fn validate_local_path(raw: &str) -> Result<String, AppError> {
             "Path is empty.",
             true,
         ));
+    }
+    if is_local_media_uri(trimmed) {
+        return Ok(trimmed.to_string());
     }
     if trimmed.contains("://") {
         return Err(AppError::new(
@@ -488,6 +505,15 @@ pub fn display_name_for(path: &str) -> String {
         .to_string()
 }
 
+/// Android SAF `content://` and local `file://` URIs. Not http(s).
+pub fn is_local_media_uri(path: &str) -> bool {
+    let Some((scheme, rest)) = path.split_once("://") else {
+        return false;
+    };
+    !rest.is_empty()
+        && (scheme.eq_ignore_ascii_case("content") || scheme.eq_ignore_ascii_case("file"))
+}
+
 pub fn redact_path(path: &str) -> String {
     let p = std::path::Path::new(path);
     match p.file_name().and_then(|s| s.to_str()) {
@@ -504,6 +530,19 @@ mod tests {
     fn rejects_urls() {
         let err = validate_local_path("https://example.com/a.mp4").unwrap_err();
         assert_eq!(err.code, ErrorCode::UrlRejected);
+        let err = validate_local_path("http://example.com/a.mp4").unwrap_err();
+        assert_eq!(err.code, ErrorCode::UrlRejected);
+    }
+
+    #[test]
+    fn accepts_android_content_uri() {
+        let uri = "content://media/external/video/media/1";
+        assert_eq!(validate_local_path(uri).unwrap(), uri);
+        assert!(is_local_media_uri(uri));
+        let file = "file:///storage/emulated/0/Movie.mp4";
+        assert_eq!(validate_local_path(file).unwrap(), file);
+        assert!(is_local_media_uri(file));
+        assert!(!is_local_media_uri("https://example.com/a.mp4"));
     }
 
     #[test]

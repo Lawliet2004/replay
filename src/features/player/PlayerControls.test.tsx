@@ -1,5 +1,6 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import closeIconSvg from "../../assets/close_icon.svg?raw";
 import { defaultSnapshot } from "../../generated/player";
 import { FullscreenCloseButton, PlayerControls } from "./PlayerControls";
 import { setPlayerFullscreen, togglePlayerFullscreen } from "./fullscreen";
@@ -48,7 +49,7 @@ describe("PlayerControls", () => {
     expect(screen.getByRole("button", { name: "Settings" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "More options" })).toBeNull();
     expect(screen.queryByText("clip.mp4")).toBeNull();
-    expect(screen.getByLabelText("Playback time").textContent).toMatch(/0:12 \/ 1:40/);
+    expect(screen.getByLabelText(/Position 0:12 of 1:40/).textContent).toMatch(/0:12 \/ 1:40/);
     const row = bar.querySelector(".controls-row");
     const seek = screen.getByLabelText("Seek");
     expect(row).not.toBeNull();
@@ -80,12 +81,19 @@ describe("PlayerControls", () => {
     const btn = screen.getByRole("button", { name: "Exit fullscreen" });
     expect(btn.classList.contains("fullscreen-close-btn")).toBe(true);
     expect(document.querySelector(".fullscreen-close")).not.toBeNull();
-    expect(btn.querySelector("svg")?.getAttribute("viewBox")).toBe("0 0 128 128");
+    expect(btn.querySelector("svg")?.getAttribute("viewBox")).toBe("0 0 1024 1024");
     const disc = btn.querySelector("svg circle.fullscreen-close-disc");
     expect(disc).not.toBeNull();
-    // Chrome/YouTube: flat gray disc. r>64 overfills so GDI clips solid fill.
-    expect(disc?.getAttribute("fill")).toBe("#53565B");
-    expect(Number(disc?.getAttribute("r"))).toBeGreaterThan(64);
+    expect(closeIconSvg).toContain('viewBox="0 0 1024 1024"');
+    expect(closeIconSvg).toContain('fill="#2F2B43"');
+    expect(closeIconSvg).toContain('fill-opacity="0.88"');
+    expect(closeIconSvg).toContain("M432 432L592 592M592 432L432 592");
+    expect(disc?.getAttribute("fill")).toBe("#2F2B43");
+    expect(disc?.getAttribute("fill-opacity")).toBe("0.88");
+    expect(disc?.getAttribute("r")).toBe("252");
+    expect(btn.querySelector("svg path.fullscreen-close-x")?.getAttribute("stroke")).toBe(
+      "#F7F6FA",
+    );
     expect(btn.querySelector("svg circle.fullscreen-close-inner-ring")).toBeNull();
     fireEvent.mouseEnter(btn.parentElement as HTMLElement);
     expect(onHoverChange).toHaveBeenCalledWith(true);

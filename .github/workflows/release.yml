@@ -8,6 +8,9 @@ on:
 permissions:
   contents: write
 
+env:
+  RELEASE_NOTES: "See THIRD_PARTY_NOTICES.md for libmpv/FFmpeg (desktop) and AndroidX Media3/ExoPlayer (Android APK) obligations."
+
 jobs:
   build:
     strategy:
@@ -59,13 +62,80 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseName: Replay ${{ github.ref_name }}
-          releaseBody: "See THIRD_PARTY_NOTICES.md for libmpv/FFmpeg obligations."
+          releaseBody: "${{ env.RELEASE_NOTES }}"
           releaseDraft: true
           prerelease: false
           args: --target ${{ matrix.target }}
 
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+      - name: Setup JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+      - name: Setup Android NDK
+        uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: r26d
+          link-to-sdk: true
+      - name: Export NDK
+        run: |
+          echo "NDK_HOME=${{ steps.setup-ndk.outputs.ndk-path }}" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=${{ steps.setup-ndk.outputs.ndk-path }}" >> "$GITHUB_ENV"
+      - name: Install JS
+        run: npm ci
+      - name: Init Android project
+        run: |
+          if [ ! -d src-tauri/gen/android ]; then
+            npx tauri android init --ci --skip-targets-install
+          fi
+      - name: Build APK
+        run: npx tauri android build --apk --target aarch64
+      - name: Upload arm64 APK to draft release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="${{ github.ref_name }}"
+          NOTES="${{ env.RELEASE_NOTES }}"
+          APK=""
+          if [ -d src-tauri/gen/android/app/build/outputs/apk ]; then
+            APK="$(find src-tauri/gen/android/app/build/outputs/apk -type f \( -name '*arm64*.apk' -o -name '*aarch64*.apk' \) -print -quit || true)"
+            if [ -z "$APK" ]; then
+              APK="$(find src-tauri/gen/android/app/build/outputs/apk -type f -name '*.apk' -print -quit || true)"
+            fi
+          fi
+          if [ -z "$APK" ] && [ -d src-tauri/target ]; then
+            APK="$(find src-tauri/target -type f -name '*.apk' -print -quit || true)"
+          fi
+          if [ -z "$APK" ] || [ ! -f "$APK" ]; then
+            echo "No APK found under src-tauri/gen/android/app/build/outputs/apk or src-tauri/target"
+            ls -R src-tauri/gen/android/app/build/outputs 2>/dev/null || true
+            exit 1
+          fi
+          echo "Uploading $APK"
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --draft --title "Replay ${TAG}" --notes "$NOTES"
+          fi
+          ASSET="Replay-${TAG}-android-aarch64.apk"
+          cp "$APK" "$ASSET"
+          gh release upload "$TAG" "$ASSET" --clobber
+
   publish:
-    needs: build
+    needs: [build, android]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -77,4 +147,3 @@ jobs:
         run: |
           TAG="${{ github.ref_name }}"
           gh release edit "$TAG" --draft=false || true
-

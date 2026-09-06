@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-selectTrack"
+description = "Enables the selectTrack command without any pre-configured scope."
+commands.allow = ["selectTrack"]
+
+[[permission]]
+identifier = "deny-selectTrack"
+description = "Denies the selectTrack command without any pre-configured scope."
+commands.deny = ["selectTrack"]

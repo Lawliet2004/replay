@@ -124,13 +124,15 @@ export type PlayerCommand =
   | { type: "set_repeat"; request_id: string; mode: RepeatMode }
   | { type: "select_track"; request_id: string; kind: TrackKind; track_id: number | null }
   | { type: "add_subtitle"; request_id: string; path: string }
+  | { type: "remove_subtitle"; request_id: string; track_id: number }
   | { type: "set_subtitle_style"; request_id: string; style: SubtitleStyle }
   | { type: "clear_playlist"; request_id: string }
   | { type: "remove_playlist_item"; request_id: string; index: number }
   | { type: "play_index"; request_id: string; index: number }
   | { type: "reorder_playlist"; request_id: string; from: number; to: number }
   | { type: "apply_settings"; request_id: string; settings: Settings }
-  | { type: "get_snapshot"; request_id: string };
+  | { type: "get_snapshot"; request_id: string }
+  | { type: "flush_now"; request_id: string };
 
 export type PlayerEvent =
   | { type: "snapshot"; snapshot: PlayerSnapshot }

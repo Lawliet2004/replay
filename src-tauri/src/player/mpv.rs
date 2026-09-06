@@ -50,7 +50,6 @@ struct MpvEventEndFile {
 
 type FnCreate = unsafe extern "C" fn() -> MpvHandle;
 type FnInitialize = unsafe extern "C" fn(MpvHandle) -> c_int;
-type FnDestroy = unsafe extern "C" fn(MpvHandle);
 type FnCommand = unsafe extern "C" fn(MpvHandle, *const *const c_char) -> c_int;
 type FnSetProperty = unsafe extern "C" fn(MpvHandle, *const c_char, c_int, *mut c_void) -> c_int;
 type FnGetProperty = unsafe extern "C" fn(MpvHandle, *const c_char, c_int, *mut c_void) -> c_int;
@@ -64,7 +63,6 @@ struct Api {
     _lib: Library,
     create: FnCreate,
     initialize: FnInitialize,
-    destroy: FnDestroy,
     terminate_destroy: FnTerminateDestroy,
     command: FnCommand,
     set_property: FnSetProperty,
@@ -99,7 +97,6 @@ impl Api {
         Ok(Self {
             create: sym(&lib, b"mpv_create\0")?,
             initialize: sym(&lib, b"mpv_initialize\0")?,
-            destroy: sym(&lib, b"mpv_destroy\0")?,
             terminate_destroy: sym(&lib, b"mpv_terminate_destroy\0")?,
             command: sym(&lib, b"mpv_command\0")?,
             set_property: sym(&lib, b"mpv_set_property\0")?,
@@ -335,11 +332,11 @@ impl Mpv {
         if let Some(ctx) = profile.gpu_context {
             let _ = self.set_string("gpu-context", ctx);
         }
+        // Keep D3D11 inside the host HWND so a layered close-icon popup can
+        // composite above the video. `overlay` output mode promotes a hardware
+        // plane that covers every sibling window and forces the 1-bit GDI hole.
+        let _ = self.set_string("d3d11-output-mode", "window");
         Ok(())
-    }
-
-    pub fn set_wid(&self, wid: i64) -> Result<(), AppError> {
-        self.set_int64("wid", wid)
     }
 
     pub fn command(&self, args: &[&str]) -> Result<(), AppError> {
@@ -481,7 +478,7 @@ impl Mpv {
             "track-list",
             "media-title",
         ] {
-            let cname = CString::new(name).unwrap();
+            let cname = CString::new(name).expect("NUL in property name");
             if let Err(e) = self.check(
                 unsafe {
                     (self.api.observe_property)(self.handle, 0, cname.as_ptr(), MPV_FORMAT_NONE)
@@ -495,7 +492,7 @@ impl Mpv {
     }
 
     pub fn get_double(&self, name: &str) -> Result<f64, AppError> {
-        let cname = CString::new(name).unwrap();
+        let cname = CString::new(name).expect("NUL in property name");
         let mut out = 0.0f64;
         self.check(
             unsafe {
@@ -512,7 +509,7 @@ impl Mpv {
     }
 
     pub fn get_flag(&self, name: &str) -> Result<bool, AppError> {
-        let cname = CString::new(name).unwrap();
+        let cname = CString::new(name).expect("NUL in property name");
         let mut out: c_int = 0;
         self.check(
             unsafe {
@@ -529,7 +526,7 @@ impl Mpv {
     }
 
     pub fn get_string(&self, name: &str) -> Result<Option<String>, AppError> {
-        let cname = CString::new(name).unwrap();
+        let cname = CString::new(name).expect("NUL in property name");
         let mut out: *mut c_char = ptr::null_mut();
         let status = unsafe {
             (self.api.get_property)(
@@ -605,9 +602,9 @@ impl Mpv {
         self.set_string("hwdec", if enabled { "auto-safe" } else { "no" })
     }
 
-    fn set_string(&self, name: &str, value: &str) -> Result<(), AppError> {
-        let cname = CString::new(name).unwrap();
-        let cval = CString::new(value).unwrap();
+    pub fn set_string(&self, name: &str, value: &str) -> Result<(), AppError> {
+        let cname = CString::new(name).expect("NUL in property name");
+        let cval = CString::new(value).expect("NUL in property value");
         let mut ptr = cval.as_ptr();
         self.check(
             unsafe {
@@ -623,7 +620,7 @@ impl Mpv {
     }
 
     fn set_flag(&self, name: &str, value: bool) -> Result<(), AppError> {
-        let cname = CString::new(name).unwrap();
+        let cname = CString::new(name).expect("NUL in property name");
         let mut v: c_int = if value { 1 } else { 0 };
         self.check(
             unsafe {
@@ -639,7 +636,7 @@ impl Mpv {
     }
 
     fn set_double(&self, name: &str, value: f64) -> Result<(), AppError> {
-        let cname = CString::new(name).unwrap();
+        let cname = CString::new(name).expect("NUL in property name");
         let mut v = value;
         self.check(
             unsafe {
@@ -655,7 +652,7 @@ impl Mpv {
     }
 
     fn set_int64(&self, name: &str, value: i64) -> Result<(), AppError> {
-        let cname = CString::new(name).unwrap();
+        let cname = CString::new(name).expect("NUL in property name");
         let mut v = value;
         self.check(
             unsafe {
@@ -697,10 +694,4 @@ impl Drop for Mpv {
             self.handle = ptr::null_mut();
         }
     }
-}
-
-// silence unused destroy
-#[allow(dead_code)]
-fn _keep_destroy(api: &Api, h: MpvHandle) {
-    unsafe { (api.destroy)(h) };
 }

@@ -13,22 +13,43 @@ use std::thread;
 pub struct SettingsStore {
     path: PathBuf,
     settings: Settings,
+    /// Set when the on-disk file exists but could not be read (IO error).
+    /// While blocked, saves are skipped so an unreadable file is never
+    /// overwritten with in-memory defaults; the next launch re-reads it.
+    persist_blocked: bool,
 }
 
 impl SettingsStore {
     pub fn load(app_data: &Path) -> Self {
         let path = app_data.join("settings.json");
-        let settings = match fs::read_to_string(&path) {
+        let (settings, persist_blocked) = match fs::read_to_string(&path) {
             Ok(raw) => match serde_json::from_str::<Settings>(&raw) {
-                Ok(s) => s.normalized(),
+                Ok(s) => (s.normalized(), false),
                 Err(e) => {
-                    tracing::warn!("settings corrupt, resetting: {e}");
-                    Settings::default()
+                    // Corrupt file: preserve it for inspection, then fall back
+                    // to defaults (replacing any previous .bak).
+                    let bak = app_data.join("settings.json.bak");
+                    if let Err(rename_err) = fs::rename(&path, &bak) {
+                        tracing::warn!(error = %rename_err, "could not back up corrupt settings");
+                    }
+                    tracing::warn!("settings corrupt, backed up and resetting: {e}");
+                    (Settings::default(), false)
                 }
             },
-            Err(_) => Settings::default(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (Settings::default(), false),
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "settings unreadable; using in-memory defaults without persisting"
+                );
+                (Settings::default(), true)
+            }
         };
-        Self { path, settings }
+        Self {
+            path,
+            settings,
+            persist_blocked,
+        }
     }
 
     pub fn get(&self) -> &Settings {
@@ -40,13 +61,28 @@ impl SettingsStore {
     }
 
     pub fn save(&self) -> Result<(), AppError> {
+        if self.persist_blocked {
+            return Ok(());
+        }
         atomic_write_json(&self.path, &self.settings)
     }
 
     /// Fire-and-forget persist so the player actor never blocks on disk I/O.
     /// Coalesces onto one writer thread so open/seek cannot spawn a thread storm.
     pub fn save_async(&self) {
+        if self.persist_blocked {
+            return;
+        }
         let _ = persist_sender().send((self.path.clone(), self.settings.clone()));
+    }
+
+    /// Inline (synchronous) persist for the exit path, where the async writer
+    /// thread may be torn down before it drains.
+    pub fn save_sync(&self) -> Result<(), AppError> {
+        if self.persist_blocked {
+            return Ok(());
+        }
+        atomic_write_json(&self.path, &self.settings)
     }
 
     pub fn remember_opened(&mut self, path: &str) {

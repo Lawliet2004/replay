@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-togglePause"
+description = "Enables the togglePause command without any pre-configured scope."
+commands.allow = ["togglePause"]
+
+[[permission]]
+identifier = "deny-togglePause"
+description = "Denies the togglePause command without any pre-configured scope."
+commands.deny = ["togglePause"]

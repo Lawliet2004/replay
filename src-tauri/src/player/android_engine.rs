@@ -94,9 +94,9 @@ pub fn map_command(cmd: &PlayerCommand) -> Result<AndroidEngineCall, AndroidMapE
         PlayerCommand::AddSubtitle { path, .. } => Ok(AndroidEngineCall::AddSubtitle {
             uri: map_local_uri(path)?,
         }),
-        PlayerCommand::RemoveSubtitle { track_id, .. } => {
-            Ok(AndroidEngineCall::RemoveSubtitle { track_id: *track_id })
-        }
+        PlayerCommand::RemoveSubtitle { track_id, .. } => Ok(AndroidEngineCall::RemoveSubtitle {
+            track_id: *track_id,
+        }),
         PlayerCommand::SelectTrack { kind, track_id, .. } => Ok(AndroidEngineCall::SelectTrack {
             kind: *kind,
             track_id: *track_id,

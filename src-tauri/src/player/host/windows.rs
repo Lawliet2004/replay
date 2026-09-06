@@ -12,8 +12,10 @@
 //! - The host is created/resized/destroyed only on the UI thread that owns the
 //!   parent Tauri window so VO Win32 messages are pumped normally.
 
+use super::close_overlay::CloseOverlay;
 use super::{ChromeCutout, HostHandle, VideoHost};
 use crate::error::{AppError, ErrorCode};
+use parking_lot::Mutex;
 use serde::Serialize;
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
@@ -24,7 +26,7 @@ use windows::core::{BOOL, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     CombineRgn, CreateEllipticRgn, CreateRectRgn, CreateRoundRectRgn, DeleteObject, GetStockObject,
-    SetWindowRgn, UpdateWindow, BLACK_BRUSH, HBRUSH, HRGN, RGN_DIFF,
+    SetWindowRgn, BLACK_BRUSH, HBRUSH, HRGN, RGN_DIFF,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
@@ -35,11 +37,11 @@ use windows::Win32::UI::WindowsAndMessaging::{
     KillTimer, MoveWindow, RegisterClassW, SetForegroundWindow, SetTimer, SetWindowLongPtrW,
     SetWindowPos, SetWindowsHookExW, ShowWindow, UnhookWindowsHookEx, WindowFromPoint, CS_HREDRAW,
     CS_OWNDC, CS_VREDRAW, CW_USEDEFAULT, GA_ROOT, GWL_EXSTYLE, HC_ACTION, HHOOK, HTTRANSPARENT,
-    HWND_TOP, MSLLHOOKSTRUCT, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-    SWP_NOZORDER, SWP_SHOWWINDOW, SW_HIDE, SW_RESTORE, SW_SHOW, WH_MOUSE_LL, WINDOW_EX_STYLE,
-    WM_DESTROY, WM_ERASEBKGND, WM_LBUTTONDOWN, WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_NCHITTEST,
-    WM_PAINT, WM_RBUTTONDOWN, WM_TIMER, WNDCLASSW, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS,
-    WS_EX_NOACTIVATE, WS_EX_TRANSPARENT,
+    HWND_BOTTOM, HWND_TOP, MSLLHOOKSTRUCT, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
+    SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SW_HIDE, SW_RESTORE, SW_SHOW, WH_MOUSE_LL,
+    WINDOW_EX_STYLE, WM_DESTROY, WM_ERASEBKGND, WM_LBUTTONDOWN, WM_MBUTTONDOWN, WM_MOUSEMOVE,
+    WM_NCHITTEST, WM_PAINT, WM_RBUTTONDOWN, WM_SIZE, WM_TIMER, WNDCLASSW, WS_CHILD,
+    WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_NOACTIVATE, WS_EX_TRANSPARENT,
 };
 
 const CLASS_NAME: &str = "ReplayMpvHost";
@@ -55,6 +57,14 @@ static ACTIVITY_HOOK: AtomicIsize = AtomicIsize::new(0);
 static ACTIVITY_PARENT: AtomicIsize = AtomicIsize::new(0);
 static ACTIVITY_APP: OnceLock<AppHandle> = OnceLock::new();
 static ACTIVITY_LAST_EMIT: AtomicU64 = AtomicU64::new(0);
+/// Cached parent window rect (screen px) so the mouse hook avoids GetWindowRect
+/// on every system-wide mouse move. Zero width marks it invalid.
+static CACHED_RECT: Mutex<RECT> = Mutex::new(RECT {
+    left: 0,
+    top: 0,
+    right: 0,
+    bottom: 0,
+});
 
 /// Screen-space click over the Tauri window. Physical px relative to the
 /// window's top-left (from `GetWindowRect`), plus window size for DPI mapping.
@@ -171,6 +181,30 @@ unsafe fn maybe_activate_on_click(
     }
 }
 
+/// Cached parent window rect for the mouse hook. O(1) containment checks on
+/// every system-wide mouse move; `GetWindowRect` is only re-queried when the
+/// cache is invalidated (window resized/moved/visibility changed).
+fn cached_parent_rect(parent: HWND, live: bool) -> RECT {
+    let mut cached = CACHED_RECT.lock();
+    if !live {
+        *cached = RECT::default();
+        return *cached;
+    }
+    if cached.right <= cached.left || cached.bottom <= cached.top {
+        let mut fresh = RECT::default();
+        unsafe {
+            let _ = GetWindowRect(parent, &mut fresh);
+        }
+        *cached = fresh;
+    }
+    *cached
+}
+
+/// Invalidate the cached rect — call after the window moves or resizes.
+pub fn invalidate_activity_rect() {
+    *CACHED_RECT.lock() = RECT::default();
+}
+
 /// Low-level mouse hook: the HWND_TOP video host swallows pointer input, so the
 /// webview never sees mouse movement over the video and chrome can never be
 /// revealed. The hook sees all mouse input regardless of which HWND owns it and
@@ -193,30 +227,36 @@ unsafe extern "system" fn activity_mouse_proc(
         {
             let parent = HWND(ACTIVITY_PARENT.load(Ordering::Relaxed) as *mut _);
             let pt = unsafe { (*(lparam.0 as *const MSLLHOOKSTRUCT)).pt };
-            let mut rect = RECT::default();
             let live = unsafe {
                 !parent.0.is_null()
                     && IsWindow(Some(parent)).as_bool()
                     && IsWindowVisible(parent).as_bool()
                     && !IsIconic(parent).as_bool()
             };
-            let inside = live
-                && unsafe {
-                    let _ = GetWindowRect(parent, &mut rect);
-                    pt_in_rect(pt, rect)
-                };
+            let rect = cached_parent_rect(parent, live);
+            let inside = live && pt_in_rect(pt, rect);
             if inside {
                 let hit_ours = unsafe { hit_belongs_to_us(parent, pt) };
+                let close_hit = super::close_overlay::owns_screen_point(pt);
                 // Activation must not be throttled — every click on *us* should raise us.
                 if msg == WM_LBUTTONDOWN || msg == WM_RBUTTONDOWN || msg == WM_MBUTTONDOWN {
                     // Read focus *before* raising, so the activating click cannot
                     // also toggle play/pause.
                     let we_are_fg = unsafe { we_are_foreground(parent) };
-                    unsafe { maybe_activate_on_click(parent, true, we_are_fg, hit_ours) };
-                    // Video host is HWND_TOP and swallows webview clicks; emit so
-                    // the frontend can toggle play/pause on the video surface.
-                    if msg == WM_LBUTTONDOWN && should_emit_surface_click(true, we_are_fg, hit_ours)
+                    unsafe {
+                        maybe_activate_on_click(parent, true, we_are_fg, hit_ours || close_hit)
+                    };
+                    if msg == WM_LBUTTONDOWN && close_hit {
+                        // Layered close popup sits above the video host, so the
+                        // webview never receives the click. Do not toggle pause.
+                        if let Some(app) = ACTIVITY_APP.get() {
+                            let _ = app.emit("player://close-fullscreen", ());
+                        }
+                    } else if msg == WM_LBUTTONDOWN
+                        && should_emit_surface_click(true, we_are_fg, hit_ours)
                     {
+                        // Video host is HWND_TOP and swallows webview clicks; emit so
+                        // the frontend can toggle play/pause on the video surface.
                         if let Some(app) = ACTIVITY_APP.get() {
                             let payload = SurfaceClickPayload {
                                 x: pt.x - rect.left,
@@ -228,7 +268,7 @@ unsafe extern "system" fn activity_mouse_proc(
                         }
                     }
                 }
-                if hit_ours {
+                if hit_ours || close_hit {
                     let now = now_ms();
                     let last = ACTIVITY_LAST_EMIT.load(Ordering::Relaxed);
                     if now.saturating_sub(last) >= ACTIVITY_EMIT_MS {
@@ -282,6 +322,14 @@ pub fn uninstall_activity_hook() {
 unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
     match msg {
         WM_DESTROY => LRESULT(0),
+        WM_SIZE => {
+            let width = (l.0 as u32) & 0xFFFF;
+            let height = ((l.0 as u32) >> 16) & 0xFFFF;
+            if width > 0 && height > 0 {
+                resize_children(hwnd, width, height);
+            }
+            LRESULT(0)
+        }
         WM_TIMER => {
             if w.0 == CLICK_THROUGH_TIMER {
                 apply_click_through(hwnd);
@@ -306,6 +354,22 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -
             LRESULT(0)
         }
         _ => unsafe { DefWindowProcW(hwnd, msg, w, l) },
+    }
+}
+
+unsafe extern "system" fn enum_resize_child(child: HWND, lparam: LPARAM) -> BOOL {
+    unsafe {
+        let w = (lparam.0 as u32) & 0xFFFF;
+        let h = ((lparam.0 as u32) >> 16) & 0xFFFF;
+        let _ = MoveWindow(child, 0, 0, w as i32, h as i32, true);
+    }
+    BOOL(1)
+}
+
+fn resize_children(hwnd: HWND, w: u32, h: u32) {
+    unsafe {
+        let lparam = LPARAM(((h & 0xFFFF) << 16 | (w & 0xFFFF)) as isize);
+        let _ = EnumChildWindows(Some(hwnd), Some(enum_resize_child), lparam);
     }
 }
 
@@ -357,6 +421,7 @@ pub struct WindowsVideoHost {
     hwnd: HWND,
     parent: HWND,
     cutout: ChromeCutout,
+    close_overlay: CloseOverlay,
 }
 
 // Safety: HWND methods are only invoked from the UI thread that created it.
@@ -405,12 +470,14 @@ impl WindowsVideoHost {
                 WS_EX_TRANSPARENT | WS_EX_NOACTIVATE,
                 PCWSTR(class.as_ptr()),
                 PCWSTR(title.as_ptr()),
-                // Created without WS_VISIBLE — shown explicitly when media plays.
+                // Start parked below WebView2. Creating this full-client or raising
+                // it before mpv attaches can leave a promoted black D3D plane above
+                // the webview even after the HWND is hidden.
                 WS_CHILD | WS_CLIPSIBLINGS | WS_CLIPCHILDREN,
-                0,
-                0,
-                w as i32,
-                h as i32,
+                -32000,
+                -32000,
+                1,
+                1,
                 Some(parent_hwnd),
                 None,
                 Some(hinstance.into()),
@@ -424,24 +491,52 @@ impl WindowsVideoHost {
                 )
             })?;
 
-            bring_above_webview(hwnd);
+            // A hidden host must also be below WebView2 in Z-order. Geometry alone
+            // is insufficient for D3D hardware-overlay planes.
+            let _ = SetWindowPos(
+                hwnd,
+                Some(HWND_BOTTOM),
+                -32000,
+                -32000,
+                1,
+                1,
+                SWP_NOACTIVATE,
+            );
             apply_click_through(hwnd);
             let _ = ShowWindow(hwnd, SW_HIDE);
-            let _ = UpdateWindow(hwnd);
 
             tracing::info!(
                 wid = hwnd.0 as isize,
                 parent = parent,
-                w,
-                h,
-                "created Win32 video host on UI thread (HWND_TOP + click-through)"
+                requested_w = w,
+                requested_h = h,
+                "created Win32 video host parked off-screen at HWND_BOTTOM"
             );
             Ok(Self {
                 hwnd,
                 parent: parent_hwnd,
                 cutout: ChromeCutout::default(),
+                close_overlay: CloseOverlay::create(parent_hwnd),
             })
         }
+    }
+
+    fn sync_close_overlay(&mut self, full_w: u32, full_h: u32) -> bool {
+        let overlay_shown = match menu_hole(full_w, full_h, self.cutout) {
+            Some((x0, y0, x1, y1))
+                if is_circular_chip((x1 - x0).max(0) as u32, (y1 - y0).max(0) as u32) =>
+            {
+                self.close_overlay.show_chip((x0, y0, x1, y1))
+            }
+            _ => {
+                self.close_overlay.hide();
+                false
+            }
+        };
+        if overlay_shown {
+            self.close_overlay.raise();
+        }
+        overlay_shown
     }
 
     pub fn diagnose_hwnd(&self) -> String {
@@ -527,11 +622,12 @@ fn square_hole(mx0: i32, my0: i32, mx1: i32, my1: i32) -> (i32, i32, i32, i32) {
 
 /// Corner diameter for `CreateRoundRectRgn` on rectangular overlay panels.
 ///
-/// Circular close chips use `CreateEllipticRgn`; panels match the CSS 12px border radius.
+/// Circular close chips are painted by the layered SVG overlay (per-pixel AA).
+/// Rectangular panels still use `CreateRoundRectRgn`.
 fn menu_corner_diameter(menu_w: u32, menu_h: u32) -> i32 {
     let shorter = menu_w.min(menu_h).max(1);
-    let radius = (shorter as f64 * (12.0 / 300.0)).round() as i32;
-    (radius * 2).clamp(16, 48)
+    let radius = (shorter as f64 * (8.0 / 168.0)).round() as i32;
+    (radius * 2).clamp(16, 24)
 }
 
 /// Keep the host full-bleed for correct mpv aspect, but punch out chrome /
@@ -540,13 +636,31 @@ fn menu_corner_diameter(menu_w: u32, menu_h: u32) -> i32 {
 /// - `top` / `bottom`: full-width strips
 /// - `right`: full-height strip below the top cutout (drawers)
 /// - `menu_*`: measured ⋯ panel rect, anywhere in the client
-fn apply_chrome_cutout(hwnd: HWND, full_w: u32, full_h: u32, cutout: ChromeCutout) {
+fn apply_chrome_cutout(
+    hwnd: HWND,
+    full_w: u32,
+    full_h: u32,
+    cutout: ChromeCutout,
+    svg_overlay_owns_chip: bool,
+) {
     unsafe {
         let top = cutout.top.min(full_h.saturating_sub(1));
         let bottom = cutout.bottom.min(full_h.saturating_sub(1 + top));
         let right = cutout.right.min(full_w.saturating_sub(1));
         let menu = menu_hole(full_w, full_h, cutout);
-        if top == 0 && bottom == 0 && right == 0 && menu.is_none() {
+        let menu_for_region = match menu {
+            Some((mx0, my0, mx1, my1)) => {
+                let hole_w = (mx1 - mx0).max(0) as u32;
+                let hole_h = (my1 - my0).max(0) as u32;
+                if svg_overlay_owns_chip && is_circular_chip(hole_w, hole_h) {
+                    None
+                } else {
+                    Some((mx0, my0, mx1, my1))
+                }
+            }
+            None => None,
+        };
+        if top == 0 && bottom == 0 && right == 0 && menu_for_region.is_none() {
             // NULL region = window uses its full rectangle again.
             let _ = SetWindowRgn(hwnd, None::<HRGN>, true);
             return;
@@ -557,13 +671,12 @@ fn apply_chrome_cutout(hwnd: HWND, full_w: u32, full_h: u32, cutout: ChromeCutou
         let x1 = full_w.saturating_sub(right).max(1) as i32;
         let rgn = CreateRectRgn(0, y0, x1, y1);
 
-        if let Some((mx0, my0, mx1, my1)) = menu {
+        if let Some((mx0, my0, mx1, my1)) = menu_for_region {
             let hole_w = (mx1 - mx0).max(0) as u32;
             let hole_h = (my1 - my0).max(0) as u32;
             let hole = if is_circular_chip(hole_w, hole_h) {
-                // Binary ellipse (no AA). Frontend insets this rect into the
-                // opaque gray disc so the jagged edge is gray-on-video,
-                // not a translucent SVG fringe.
+                // Fallback only: 1-bit ellipse when the SVG overlay could not
+                // be created. Prefer the layered close_icon.svg overlay.
                 let (x0, y0, x1, y1) = square_hole(mx0, my0, mx1, my1);
                 CreateEllipticRgn(x0, y0, x1, y1)
             } else {
@@ -589,21 +702,26 @@ impl VideoHost for WindowsVideoHost {
     fn set_bounds(&mut self, _x: i32, _y: i32, w: u32, h: u32) -> Result<(), AppError> {
         unsafe {
             if w == 0 || h == 0 {
+                self.close_overlay.hide();
                 let _ = KillTimer(Some(self.hwnd), CLICK_THROUGH_TIMER);
-                // Park off-screen rather than SW_HIDE — see set_visible.
+                // Park off-screen and hide
                 let _ = SetWindowRgn(self.hwnd, None::<HRGN>, true);
                 let _ = SetWindowPos(
                     self.hwnd,
-                    None,
+                    Some(HWND_BOTTOM),
                     -32000,
                     -32000,
                     1,
                     1,
-                    SWP_NOACTIVATE | SWP_NOZORDER,
+                    SWP_NOACTIVATE,
                 );
+                let _ = ShowWindow(self.hwnd, SW_HIDE);
                 return Ok(());
             }
             let (full_w, full_h) = parent_client_size(self.parent);
+            if full_w == 0 || full_h == 0 {
+                return Ok(());
+            }
             // Always size to the parent client so mpv keeps the real window aspect.
             // chrome cutouts drive the SetWindowRgn region.
             let mv = MoveWindow(self.hwnd, 0, 0, full_w as i32, full_h as i32, true);
@@ -614,7 +732,9 @@ impl VideoHost for WindowsVideoHost {
                     true,
                 )
             })?;
-            apply_chrome_cutout(self.hwnd, full_w, full_h, self.cutout);
+            resize_children(self.hwnd, full_w, full_h);
+            let overlay_shown = self.sync_close_overlay(full_w, full_h);
+            apply_chrome_cutout(self.hwnd, full_w, full_h, self.cutout, overlay_shown);
             let _ = SetWindowPos(
                 self.hwnd,
                 Some(HWND_TOP),
@@ -625,6 +745,9 @@ impl VideoHost for WindowsVideoHost {
                 SWP_NOACTIVATE | SWP_SHOWWINDOW,
             );
             let _ = ShowWindow(self.hwnd, SW_SHOW);
+            if overlay_shown {
+                self.close_overlay.raise();
+            }
             apply_click_through(self.hwnd);
             // Re-apply until libmpv creates its VO child HWND, then stop.
             CLICK_THROUGH_LEFT.store(CLICK_THROUGH_TICKS, Ordering::Relaxed);
@@ -645,7 +768,8 @@ impl VideoHost for WindowsVideoHost {
         // Re-apply region if the host is already sized.
         let (full_w, full_h) = parent_client_size(self.parent);
         if full_w > 0 && full_h > 0 {
-            apply_chrome_cutout(self.hwnd, full_w, full_h, self.cutout);
+            let overlay_shown = self.sync_close_overlay(full_w, full_h);
+            apply_chrome_cutout(self.hwnd, full_w, full_h, self.cutout, overlay_shown);
         }
         Ok(())
     }
@@ -655,26 +779,26 @@ impl VideoHost for WindowsVideoHost {
             if visible {
                 let _ = ShowWindow(self.hwnd, SW_SHOW);
                 bring_above_webview(self.hwnd);
+                self.close_overlay.raise();
                 apply_click_through(self.hwnd);
                 CLICK_THROUGH_LEFT.store(CLICK_THROUGH_TICKS, Ordering::Relaxed);
                 let _ = SetTimer(Some(self.hwnd), CLICK_THROUGH_TIMER, 300, None);
             } else {
+                self.close_overlay.hide();
                 CLICK_THROUGH_LEFT.store(0, Ordering::Relaxed);
                 let _ = KillTimer(Some(self.hwnd), CLICK_THROUGH_TIMER);
-                // Park off-screen instead of SW_HIDE: mpv keeps presenting to its
-                // swapchain while hidden, and its promoted hardware overlay plane
-                // lingers on screen painting black over the webview. Parking the
-                // window off-screen forces the plane to follow it off-screen.
+                // Park off-screen and hide so it never covers the webview.
                 let _ = SetWindowRgn(self.hwnd, None::<HRGN>, true);
                 let _ = SetWindowPos(
                     self.hwnd,
-                    None,
+                    Some(HWND_BOTTOM),
                     -32000,
                     -32000,
                     1,
                     1,
-                    SWP_NOACTIVATE | SWP_NOZORDER,
+                    SWP_NOACTIVATE,
                 );
+                let _ = ShowWindow(self.hwnd, SW_HIDE);
             }
         }
         Ok(())
@@ -685,6 +809,7 @@ impl VideoHost for WindowsVideoHost {
     }
 
     fn destroy(&mut self) {
+        self.close_overlay.destroy();
         unsafe {
             if !self.hwnd.0.is_null() {
                 let _ = KillTimer(Some(self.hwnd), CLICK_THROUGH_TIMER);

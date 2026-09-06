@@ -4,20 +4,53 @@ import type { Settings } from "./Settings";
 import type { SubtitleStyle } from "./SubtitleStyle";
 import type { TrackKind } from "./TrackKind";
 
-export type PlayerCommand = { "type": "open_paths", request_id: string, paths: Array<string>, replace: boolean, } | { "type": "play", request_id: string, } | { "type": "pause", request_id: string, } | { "type": "toggle_pause", request_id: string, } | { "type": "seek", request_id: string, position_secs: number, absolute: boolean, } | { "type": "set_volume", request_id: string, volume: number, } | { "type": "set_muted", request_id: string, muted: boolean, } | { "type": "set_speed", request_id: string, speed: number, } | { "type": "set_audio_fx", request_id: string, enabled: boolean, preset: string, } | { "type": "set_fullscreen", request_id: string, fullscreen: boolean, } | { "type": "set_host_bounds", request_id: string, width: number, height: number, 
-/**
- * Physical px to punch out at the bottom for HTML chrome. `0` = full-bleed.
- */
-chrome_bottom: number, 
-/**
- * Physical px to punch out at the top for the custom title bar. `0` = full-bleed.
- */
-chrome_top: number, 
-/**
- * Physical px to punch out on the right for drawers. `0` = none.
- */
-chrome_right: number, 
-/**
- * Measured ⋯ menu panel rect (physical px, client coords). Zero size = none.
- */
-menu_x: number, menu_y: number, menu_w: number, menu_h: number, } | { "type": "next", request_id: string, } | { "type": "previous", request_id: string, } | { "type": "set_repeat", request_id: string, mode: RepeatMode, } | { "type": "select_track", request_id: string, kind: TrackKind, track_id: bigint | null, } | { "type": "add_subtitle", request_id: string, path: string, } | { "type": "set_subtitle_style", request_id: string, style: SubtitleStyle, } | { "type": "clear_playlist", request_id: string, } | { "type": "remove_playlist_item", request_id: string, index: number, } | { "type": "play_index", request_id: string, index: number, } | { "type": "reorder_playlist", request_id: string, from: number, to: number, } | { "type": "apply_settings", request_id: string, settings: Settings, } | { "type": "get_snapshot", request_id: string, };
+export type PlayerCommand =
+  | { type: "open_paths"; request_id: string; paths: Array<string>; replace: boolean }
+  | { type: "play"; request_id: string }
+  | { type: "pause"; request_id: string }
+  | { type: "toggle_pause"; request_id: string }
+  | { type: "seek"; request_id: string; position_secs: number; absolute: boolean }
+  | { type: "set_volume"; request_id: string; volume: number }
+  | { type: "set_muted"; request_id: string; muted: boolean }
+  | { type: "set_speed"; request_id: string; speed: number }
+  | { type: "set_audio_fx"; request_id: string; enabled: boolean; preset: string }
+  | { type: "set_fullscreen"; request_id: string; fullscreen: boolean }
+  | {
+      type: "set_host_bounds";
+      request_id: string;
+      width: number;
+      height: number;
+      /**
+       * Physical px to punch out at the bottom for HTML chrome. `0` = full-bleed.
+       */
+      chrome_bottom: number;
+      /**
+       * Physical px to punch out at the top for the custom title bar. `0` = full-bleed.
+       */
+      chrome_top: number;
+      /**
+       * Physical px to punch out on the right for drawers. `0` = none.
+       */
+      chrome_right: number;
+      /**
+       * Measured ⋯ menu panel rect (physical px, client coords). Zero size = none.
+       */
+      menu_x: number;
+      menu_y: number;
+      menu_w: number;
+      menu_h: number;
+    }
+  | { type: "next"; request_id: string }
+  | { type: "previous"; request_id: string }
+  | { type: "set_repeat"; request_id: string; mode: RepeatMode }
+  | { type: "select_track"; request_id: string; kind: TrackKind; track_id: bigint | null }
+  | { type: "add_subtitle"; request_id: string; path: string }
+  | { type: "remove_subtitle"; request_id: string; track_id: bigint }
+  | { type: "set_subtitle_style"; request_id: string; style: SubtitleStyle }
+  | { type: "clear_playlist"; request_id: string }
+  | { type: "remove_playlist_item"; request_id: string; index: number }
+  | { type: "play_index"; request_id: string; index: number }
+  | { type: "reorder_playlist"; request_id: string; from: number; to: number }
+  | { type: "apply_settings"; request_id: string; settings: Settings }
+  | { type: "get_snapshot"; request_id: string }
+  | { type: "flush_now"; request_id: string };

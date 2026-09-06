@@ -1,16 +1,24 @@
-import { forwardRef, useRef, type CSSProperties } from "react";
+import { forwardRef, useEffect, useRef, useState, type CSSProperties } from "react";
 import { dispatch, shallowEqual, usePlayerSnapshot } from "./store";
 import { Timeline } from "./Timeline";
 import { setPlayerFullscreen, togglePlayerFullscreen } from "./fullscreen";
 import { formatTime } from "./time";
 import { FULLSCREEN_CLOSE_SLOT_TOP_PX } from "./chromeAutoHide";
+import { Icon } from "../../components/icons";
+import type { RepeatMode } from "../../generated/player";
 
 function TimePair() {
-  const text = usePlayerSnapshot(
-    (s) => `${formatTime(s.positionSecs)} / ${formatTime(s.durationSecs)}`,
+  const data = usePlayerSnapshot(
+    (s) => ({
+      position: s.positionSecs,
+      duration: s.durationSecs,
+    }),
+    shallowEqual,
   );
+  const text = `${formatTime(data.position)} / ${formatTime(data.duration)}`;
+  const valueText = `Position ${formatTime(data.position)} of ${formatTime(data.duration)}`;
   return (
-    <span className="time-pair mono" aria-label="Playback time">
+    <span className="time-pair mono" aria-label={valueText} title={valueText}>
       {text}
     </span>
   );
@@ -40,30 +48,36 @@ function FullscreenIcon({ exit }: { exit: boolean }) {
 }
 
 /**
- * Chrome FullscreenControlView close chip (the top-center X on YouTube
- * fullscreen): flat 48px gray disc, 24px rounded X, no border/shadow.
- *
- * Fill is Chrome's `rgba(40,44,50,0.80)` composited over white — the color in
- * the YouTube screenshot. The disc is opaque (sibling HWNDs cannot blend with
- * video). r>64 overfills the viewBox so the 1-bit GDI hole clips solid gray
- * instead of the anti-aliased fringe (that fringe is the jagged rim).
+ * Fullscreen close chip from `src/assets/close_icon.svg` (1024² canvas, disc
+ * r=252 at the center). CSS scales the canvas so the disc fills the 52px chip;
+ * on Windows the same file is composited with per-pixel alpha above the video
+ * host so the circumference is anti-aliased instead of a 1-bit GDI ellipse.
  */
 function FullscreenCloseGlyph() {
   return (
     <svg
-      viewBox="0 0 128 128"
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 1024 1024"
       className="fullscreen-close-glyph"
       aria-hidden="true"
       focusable="false"
       overflow="visible"
     >
-      <circle cx="64" cy="64" r="66" fill="#53565B" className="fullscreen-close-disc" />
+      <circle
+        cx="512"
+        cy="512"
+        r="252"
+        fill="#2F2B43"
+        fillOpacity="0.88"
+        className="fullscreen-close-disc"
+      />
       <path
-        d="M51 51L77 77M77 51L51 77"
+        d="M432 432L592 592M592 432L432 592"
         fill="none"
-        stroke="#ffffff"
-        strokeWidth="6"
+        stroke="#F7F6FA"
+        strokeWidth="30"
         strokeLinecap="round"
+        strokeLinejoin="round"
         className="fullscreen-close-x"
       />
     </svg>
@@ -118,15 +132,39 @@ export function PlayerControls({
       volume: s.volume,
       fullscreen: s.fullscreen,
       subtitleTracks: s.subtitleTracks,
+      playlistLength: s.playlist.items.length,
+      repeat: s.playlist.repeat,
     }),
     shallowEqual,
   );
   const playing = snap.phase === "playing";
   const selectedSub = snap.subtitleTracks.find((t) => t.selected);
   const lastSubId = useRef<number | null>(null);
-  if (selectedSub) lastSubId.current = selectedSub.id;
+  // Track the last-seen selected subtitle id in an effect, not during render
+  // (writing refs in render is fragile under concurrent rendering).
+  useEffect(() => {
+    if (selectedSub) lastSubId.current = selectedSub.id;
+  }, [selectedSub]);
   const hasSubs = snap.subtitleTracks.length > 0;
   const captionsOn = Boolean(selectedSub);
+  const prevNextDisabled = snap.playlistLength < 2;
+
+  // Optimistic volume: mirror the slider locally while dragging so the thumb
+  // doesn't wait for the backend round-trip.
+  const [volumeDragging, setVolumeDragging] = useState(false);
+  const [localVolume, setLocalVolume] = useState<number | null>(null);
+  const displayVolume = Math.min(
+    volumeDragging && localVolume != null ? localVolume : snap.muted ? 0 : snap.volume,
+    100,
+  );
+
+  const order: RepeatMode[] = ["off", "one", "all"];
+  const cycleRepeat = () => {
+    const next = order[(order.indexOf(snap.repeat) + 1) % order.length];
+    void dispatch({ type: "set_repeat", mode: next });
+  };
+  const repeatLabel =
+    snap.repeat === "one" ? "Repeat one" : snap.repeat === "all" ? "Repeat all" : "Repeat off";
 
   function toggleCaptions() {
     if (!hasSubs) return;
@@ -149,38 +187,30 @@ export function PlayerControls({
             type="button"
             className="icon-btn play"
             aria-label={playing ? "Pause" : "Play"}
+            title={playing ? "Pause (K)" : "Play (K)"}
             onClick={() => void dispatch({ type: "toggle_pause" })}
           >
-            {playing ? (
-              <svg viewBox="0 0 24 24" aria-hidden="true">
-                <rect x="6" y="5" width="4" height="14" rx="1" fill="currentColor" />
-                <rect x="14" y="5" width="4" height="14" rx="1" fill="currentColor" />
-              </svg>
-            ) : (
-              <svg viewBox="0 0 24 24" aria-hidden="true">
-                <path d="M8 5v14l11-7z" fill="currentColor" />
-              </svg>
-            )}
+            <Icon name={playing ? "pause" : "play"} size="lg" />
           </button>
           <button
             type="button"
             className="icon-btn"
             aria-label="Previous"
+            title="Previous (P)"
+            disabled={prevNextDisabled}
             onClick={() => void dispatch({ type: "previous" })}
           >
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M6 6h2v12H6zm3.5 6 8.5 6V6z" fill="currentColor" />
-            </svg>
+            <Icon name="previous" />
           </button>
           <button
             type="button"
             className="icon-btn"
             aria-label="Next"
+            title="Next (N)"
+            disabled={prevNextDisabled}
             onClick={() => void dispatch({ type: "next" })}
           >
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M16 6h2v12h-2zm-11 6 8.5-6v12z" fill="currentColor" />
-            </svg>
+            <Icon name="next" />
           </button>
         </div>
 
@@ -188,79 +218,102 @@ export function PlayerControls({
           <button
             type="button"
             className="icon-btn"
-            aria-label={snap.muted ? "Unmute" : "Mute"}
+            aria-label={snap.muted || snap.volume === 0 ? "Unmute" : "Mute"}
+            title={snap.muted || snap.volume === 0 ? "Unmute (M)" : "Mute (M)"}
             onClick={() => void dispatch({ type: "set_muted", muted: !snap.muted })}
           >
-            {snap.muted || snap.volume === 0 ? (
-              <svg viewBox="0 0 24 24" aria-hidden="true">
-                <path
-                  d="M16.5 12a4.5 4.5 0 0 0-1.5-3.3l1.4-1.4A6.5 6.5 0 0 1 18.5 12a6.5 6.5 0 0 1-2.1 4.7l-1.4-1.4A4.5 4.5 0 0 0 16.5 12zM4 9v6h4l5 5V4L8 9H4zm11.7 8.7-1.4-1.4.7-.7L4.2 4.5 5.6 3.1l14 14-1.4 1.4-.5-.5z"
-                  fill="currentColor"
-                />
-              </svg>
-            ) : (
-              <svg viewBox="0 0 24 24" aria-hidden="true">
-                <path
-                  d="M4 9v6h4l5 5V4L8 9H4zm11.5 3a4.5 4.5 0 0 0-1.5-3.3v6.6A4.5 4.5 0 0 0 15.5 12z"
-                  fill="currentColor"
-                />
-              </svg>
-            )}
+            <Icon name={snap.muted || snap.volume === 0 ? "volume-mute" : "volume"} />
           </button>
           <input
             type="range"
             min={0}
             max={100}
-            value={snap.muted ? 0 : snap.volume}
+            value={displayVolume}
             aria-label="Volume"
+            aria-valuetext={`${Math.round(displayVolume)} percent`}
             style={
               {
-                ["--range-progress" as string]: `${snap.muted ? 0 : snap.volume}%`,
+                ["--range-progress" as string]: `${displayVolume}%`,
               } as CSSProperties
             }
-            onChange={(e) => void dispatch({ type: "set_volume", volume: Number(e.target.value) })}
+            onPointerDown={() => setVolumeDragging(true)}
+            onPointerUp={() => {
+              setVolumeDragging(false);
+              setLocalVolume(null);
+            }}
+            onPointerCancel={() => {
+              setVolumeDragging(false);
+              setLocalVolume(null);
+            }}
+            onChange={(e) => {
+              const v = Number(e.target.value);
+              setLocalVolume(v);
+              void dispatch({ type: "set_volume", volume: v });
+              // Dragging the slider away from 0 while muted unmutes (the
+              // universal player convention).
+              if (snap.muted && v > 0) {
+                void dispatch({ type: "set_muted", muted: false });
+              }
+            }}
           />
         </div>
 
         <TimePair />
 
         <div className="controls-group end">
-          {hasSubs ? (
-            <button
-              type="button"
-              className={`icon-btn${captionsOn ? " is-on" : ""}`}
-              aria-label={captionsOn ? "Turn captions off" : "Turn captions on"}
-              aria-pressed={captionsOn}
-              onClick={toggleCaptions}
-            >
-              <svg viewBox="0 0 24 24" aria-hidden="true">
-                <path
-                  d="M4 5h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2zm3.2 5.2c-.9 0-1.5.4-1.9 1.1-.3.6-.3 1.4 0 2 .4.7 1 1.1 1.9 1.1.6 0 1.1-.2 1.5-.5l.7.9c-.6.5-1.4.8-2.3.8-1.5 0-2.6-.6-3.2-1.7-.6-1-.6-2.3 0-3.3.6-1.1 1.7-1.7 3.2-1.7.9 0 1.7.3 2.3.8l-.7.9c-.4-.3-.9-.5-1.5-.5zm7.6 0c-.9 0-1.5.4-1.9 1.1-.3.6-.3 1.4 0 2 .4.7 1 1.1 1.9 1.1.6 0 1.1-.2 1.5-.5l.7.9c-.6.5-1.4.8-2.3.8-1.5 0-2.6-.6-3.2-1.7-.6-1-.6-2.3 0-3.3.6-1.1 1.7-1.7 3.2-1.7.9 0 1.7.3 2.3.8l-.7.9c-.4-.3-.9-.5-1.5-.5z"
-                  fill="currentColor"
-                />
-              </svg>
-            </button>
-          ) : null}
+          <button
+            type="button"
+            className={`icon-btn${snap.repeat !== "off" ? " is-on" : ""}`}
+            aria-label={repeatLabel}
+            title={repeatLabel}
+            aria-pressed={snap.repeat !== "off"}
+            onClick={cycleRepeat}
+          >
+            <Icon name={snap.repeat === "one" ? "repeat-one" : "repeat"} />
+          </button>
 
           <button
             type="button"
-            className={`icon-btn${settingsOpen ? " is-on" : ""}`}
+            className={`icon-btn${captionsOn ? " is-on" : ""}`}
+            aria-label={
+              hasSubs
+                ? captionsOn
+                  ? "Turn captions off"
+                  : "Turn captions on"
+                : "No captions — load a subtitle file in Settings"
+            }
+            title={
+              hasSubs
+                ? captionsOn
+                  ? "Turn captions off"
+                  : "Turn captions on"
+                : "No captions — load a subtitle file in Settings"
+            }
+            aria-pressed={hasSubs ? captionsOn : undefined}
+            disabled={!hasSubs}
+            onClick={toggleCaptions}
+          >
+            <Icon name="captions" />
+          </button>
+
+          <button
+            type="button"
+            className={`icon-btn settings-trigger${settingsOpen ? " is-on" : ""}`}
             aria-label="Settings"
+            title="Settings"
             aria-expanded={settingsOpen}
+            aria-haspopup="dialog"
+            aria-controls={settingsOpen ? "player-settings" : undefined}
             onClick={onToggleSettings}
           >
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path
-                d="M19.14 12.94c.04-.31.06-.63.06-.94s-.02-.63-.06-.94l2.03-1.58a.5.5 0 0 0 .12-.65l-1.92-3.32a.5.5 0 0 0-.61-.22l-2.39.96c-.5-.4-1.04-.7-1.62-.94l-.36-2.54A.5.5 0 0 0 13.9 2h-3.8a.5.5 0 0 0-.49.42l-.36 2.54c-.58.24-1.13.54-1.62.94l-2.39-.96a.5.5 0 0 0-.61.22L2.71 8.48a.5.5 0 0 0 .12.65l2.03 1.58c-.04.31-.06.63-.06.94s.02.63.06.94l-2.03 1.58a.5.5 0 0 0-.12.65l1.92 3.32c.14.24.43.34.61.22l2.39-.96c.5.4 1.04.7 1.62.94l.36 2.54c.05.24.26.42.49.42h3.8c.24 0 .44-.18.49-.42l.36-2.54c.58-.24 1.13-.54 1.62-.94l2.39.96c.18.12.47.02.61-.22l1.92-3.32a.5.5 0 0 0-.12-.65l-2.03-1.58zM12 15.6A3.6 3.6 0 1 1 12 8.4a3.6 3.6 0 0 1 0 7.2z"
-                fill="currentColor"
-              />
-            </svg>
+            <Icon name="settings" />
           </button>
 
           <button
             type="button"
             className="icon-btn"
             aria-label={snap.fullscreen ? "Exit fullscreen" : "Fullscreen"}
+            title={snap.fullscreen ? "Exit fullscreen (Esc)" : "Fullscreen (F)"}
             onClick={() => void togglePlayerFullscreen(snap.fullscreen)}
           >
             <FullscreenIcon exit={snap.fullscreen} />

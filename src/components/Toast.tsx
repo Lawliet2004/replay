@@ -6,7 +6,7 @@ import {
   type ToastApi,
   type ToastIntent,
 } from "./toasts";
-import { Icon } from "./icons";
+import { Icon, type IconName } from "./icons";
 
 const MAX_VISIBLE = 3;
 /** Coalesce identical info/success messages within this window. */
@@ -15,8 +15,15 @@ const COALESCE_MS = 1000;
 const DEFAULT_DURATION_BY_INTENT: Record<ToastIntent, number> = {
   info: 4000,
   success: 4000,
-  error: 6000,
-  action: 6000,
+  error: 9000,
+  action: 9000,
+};
+
+const INTENT_ICON: Record<ToastIntent, IconName> = {
+  info: "info",
+  success: "info",
+  error: "error",
+  action: "info",
 };
 
 export function ToastProvider({ children }: { children: ReactNode }) {
@@ -66,10 +73,12 @@ export function ToastProvider({ children }: { children: ReactNode }) {
     };
     setToasts((prev) => {
       const next = [...prev, toast];
-      // Cap visible: drop oldest non-action toasts first.
+      // Cap visible: drop oldest non-action toasts first; if the queue is all
+      // action toasts, drop the oldest action toast.
       if (next.length > MAX_VISIBLE) {
         const dropIdx = next.findIndex((t) => t.intent !== "action");
-        if (dropIdx >= 0) next.splice(dropIdx, 1);
+        const idx = dropIdx >= 0 ? dropIdx : 0;
+        next.splice(idx, 1);
       }
       return next;
     });
@@ -99,7 +108,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
 
 function ToastStack({ toasts, onDismiss }: { toasts: Toast[]; onDismiss: (id: number) => void }) {
   return (
-    <div className="toast-stack" role="region" aria-label="Notifications" aria-live="polite">
+    <div className="toast-stack" role="region" aria-label="Notifications">
       {toasts.map((t) => (
         <ToastItem key={t.id} toast={t} onDismiss={onDismiss} />
       ))}
@@ -109,18 +118,47 @@ function ToastStack({ toasts, onDismiss }: { toasts: Toast[]; onDismiss: (id: nu
 
 function ToastItem({ toast, onDismiss }: { toast: Toast; onDismiss: (id: number) => void }) {
   const [exiting, setExiting] = useState(false);
+  /** Pause-on-hover: while hovered the countdown freezes, then resumes. */
+  const [paused, setPaused] = useState(false);
+  const remainingRef = useRef(toast.durationMs);
+  const startedAtRef = useRef(performance.now());
+  const exitTimerRef = useRef(0);
+  const removeTimerRef = useRef(0);
+
+  const clearTimers = () => {
+    window.clearTimeout(exitTimerRef.current);
+    window.clearTimeout(removeTimerRef.current);
+  };
+
+  const runTimers = (remaining: number) => {
+    clearTimers();
+    exitTimerRef.current = window.setTimeout(() => setExiting(true), Math.max(remaining - 200, 0));
+    removeTimerRef.current = window.setTimeout(() => onDismiss(toast.id), remaining);
+  };
+
   useEffect(() => {
-    const exit = window.setTimeout(() => setExiting(true), toast.durationMs - 200);
-    const remove = window.setTimeout(() => onDismiss(toast.id), toast.durationMs);
-    return () => {
-      window.clearTimeout(exit);
-      window.clearTimeout(remove);
-    };
-  }, [toast.id, toast.durationMs, onDismiss]);
+    if (paused) {
+      // Freeze: bank the remaining time.
+      remainingRef.current -= performance.now() - startedAtRef.current;
+      remainingRef.current = Math.max(remainingRef.current, 0);
+      clearTimers();
+      return;
+    }
+    startedAtRef.current = performance.now();
+    runTimers(remainingRef.current);
+    return clearTimers;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [paused, toast.id, toast.durationMs, onDismiss]);
 
   const role = toast.intent === "error" ? "alert" : "status";
   return (
-    <div className={`toast toast-${toast.intent}${exiting ? " is-exiting" : ""}`} role={role}>
+    <div
+      className={`toast toast-${toast.intent}${exiting ? " is-exiting" : ""}`}
+      role={role}
+      onMouseEnter={() => setPaused(true)}
+      onMouseLeave={() => setPaused(false)}
+    >
+      <Icon name={INTENT_ICON[toast.intent]} size="sm" className="toast-intent-icon" />
       <span className="toast-message">{toast.message}</span>
       {toast.action ? (
         <button

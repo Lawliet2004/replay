@@ -1,6 +1,6 @@
 [package]
 name = "replay"
-version = "0.1.0"
+version = "0.2.0"
 description = "Replay — a focused local desktop media player"
 authors = ["Replay Contributors"]
 edition = "2021"
@@ -19,12 +19,11 @@ tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-fs = "2"
 tauri-plugin-opener = "2"
-tauri-plugin-shell = "2"
+tauri-plugin-replay-media3 = { path = "plugins/replay-media3" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 ts-rs = { version = "10", features = ["serde-compat"] }
 thiserror = "2"
-anyhow = "1"
 uuid = { version = "1", features = ["v4", "serde"] }
 parking_lot = "0.12"
 tracing = "0.1"
@@ -35,6 +34,7 @@ raw-window-handle = "0.6"
 libloading = "0.8"
 
 [target.'cfg(windows)'.dependencies]
+resvg = { version = "0.45", default-features = false }
 windows = { version = "0.61", features = [
   "Win32_Foundation",
   "Win32_UI_WindowsAndMessaging",
@@ -44,7 +44,7 @@ windows = { version = "0.61", features = [
   "Win32_System_Threading",
 ] }
 
-[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+[target.'cfg(all(unix, not(target_os = "macos"), not(target_os = "android")))'.dependencies]
 x11 = { version = "2", features = ["xlib"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]

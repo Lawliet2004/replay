@@ -4,8 +4,25 @@ import type { RepeatMode } from "./RepeatMode";
 import type { ResumeEntry } from "./ResumeEntry";
 import type { SubtitleStyle } from "./SubtitleStyle";
 
-export type Settings = { version: number, volume: number, muted: boolean, speed: number, fxEnabled: boolean, fxPreset: string, repeat: RepeatMode, resumeEnabled: boolean, autoplayNext: boolean, hardwareDecode: boolean, subtitleStyle: SubtitleStyle, rememberWindow: boolean, windowWidth: number, windowHeight: number, 
-/**
- * Keyboard seek step in seconds (←/→ and J/L).
- */
-seekStepSecs: number, recent: Array<MediaItem>, resumePositions: Array<ResumeEntry>, };
+export type Settings = {
+  version: number;
+  volume: number;
+  muted: boolean;
+  speed: number;
+  fxEnabled: boolean;
+  fxPreset: string;
+  repeat: RepeatMode;
+  resumeEnabled: boolean;
+  autoplayNext: boolean;
+  hardwareDecode: boolean;
+  subtitleStyle: SubtitleStyle;
+  rememberWindow: boolean;
+  windowWidth: number;
+  windowHeight: number;
+  /**
+   * Keyboard seek step in seconds (←/→ and J/L).
+   */
+  seekStepSecs: number;
+  recent: Array<MediaItem>;
+  resumePositions: Array<ResumeEntry>;
+};

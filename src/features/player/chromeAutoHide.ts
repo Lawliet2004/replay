@@ -152,13 +152,16 @@ export type ChromeAutoHideInput = {
 
 /**
  * Whether chrome should remain visible (no auto-hide timer).
- * No media / settings / loading / error → pin.
- * With media, idle pointer hides the bars even while paused; motion reveals them.
+ * No media / settings / loading / error / paused / ended → pin.
+ * Hovering the bars pins them (like paused: the user is reaching for them).
+ * With media playing + idle pointer, hide; motion reveals it.
  */
 export function shouldKeepChromeVisible(input: ChromeAutoHideInput): boolean {
   if (!input.hasMedia) return true;
   if (input.blockingUi) return true;
   if (input.phase === "loading" || input.phase === "error") return true;
+  if (input.phase === "paused" || input.phase === "ended") return true;
+  if (input.hoveringChrome) return true;
   return false;
 }
 
