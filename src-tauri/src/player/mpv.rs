@@ -322,6 +322,8 @@ impl Mpv {
         self.set_string("ytdl", "no")?;
         self.set_string("hwdec", "auto-safe")?;
         self.set_string("keep-open", "yes")?;
+        self.set_flag("keepaspect", true)?;
+        self.set_flag("keepaspect-window", true)?;
         self.set_string("idle", "yes")?;
         self.set_string("force-window", "no")?;
         self.set_string("terminal", "no")?;

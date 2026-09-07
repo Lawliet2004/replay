@@ -1,4 +1,6 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { invoke } from "@tauri-apps/api/core";
+import { isAndroidPlatform } from "../../lib/platform";
 import { dispatch } from "./store";
 
 /** Nudge layout listeners after OS fullscreen geometry settles. */
@@ -13,6 +15,12 @@ function pokeHostResize() {
  * Enter/exit true OS fullscreen and sync player snapshot + video host bounds.
  */
 export async function setPlayerFullscreen(next: boolean): Promise<boolean> {
+  if (isAndroidPlatform()) {
+    await invoke("set_mobile_fullscreen", { fullscreen: next });
+    await dispatch({ type: "set_fullscreen", fullscreen: next });
+    pokeHostResize();
+    return next;
+  }
   const win = getCurrentWindow();
   try {
     await win.setFocus();

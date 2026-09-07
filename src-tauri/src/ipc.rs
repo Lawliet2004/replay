@@ -522,3 +522,48 @@ mod tests {
         assert_eq!(layout.chrome_bottom, 140);
     }
 }
+
+/// Rotation is a native Android activity operation; desktop has no rotation control.
+#[tauri::command]
+pub async fn rotate_mobile_screen(app: AppHandle) -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    {
+        tauri::async_runtime::spawn_blocking(move || {
+            tauri_plugin_replay_media3::invoke_engine_call(
+                &app,
+                "rotateScreen",
+                serde_json::json!({}),
+            )
+            .map_err(|e| e.to_string())
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        Err("Screen rotation is only available on Android.".into())
+    }
+}
+
+#[tauri::command]
+pub async fn set_mobile_fullscreen(app: AppHandle, fullscreen: bool) -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    {
+        tauri::async_runtime::spawn_blocking(move || {
+            tauri_plugin_replay_media3::invoke_engine_call(
+                &app,
+                "setFullscreen",
+                serde_json::json!({ "fullscreen": fullscreen }),
+            )
+            .map_err(|e| e.to_string())
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (app, fullscreen);
+        Err("This command is only available on Android.".into())
+    }
+}

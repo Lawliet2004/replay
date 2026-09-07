@@ -605,8 +605,9 @@ export function SettingsPopup({
         <div className="settings-popup-body">
           {snap.subtitleTracks.length === 0 ? (
             <p className="settings-note">
-              No subtitles were detected in this file. You can load an external .srt, .ass, .ssa,
-              .vtt, .sub, .idx, or .smi file below.
+              {android
+                ? "No embedded subtitles were detected in this file."
+                : "No subtitles were detected in this file. You can load an external .srt, .ass, .ssa, .vtt, .sub, .idx, or .smi file below."}
             </p>
           ) : null}
           <ChoiceRow
@@ -637,11 +638,18 @@ export function SettingsPopup({
               ) : null}
             </div>
           ))}
-          <NavRow
-            label="Load external subtitle…"
-            chevron={false}
-            onClick={() => void addSubtitle()}
-          />
+          {android ? (
+            <p className="settings-note">
+              Embedded captions are supported. External subtitle files are not available on Android
+              yet.
+            </p>
+          ) : (
+            <NavRow
+              label="Load external subtitle…"
+              chevron={false}
+              onClick={() => void addSubtitle()}
+            />
+          )}
         </div>
       ) : view === "audio" ? (
         <div className="settings-popup-body">
@@ -792,13 +800,16 @@ export function SettingsPopup({
                 <span>
                   Hardware decode
                   <p className="settings-note">
-                    Use the GPU to decode video for smoother playback.
+                    {android
+                      ? "Managed automatically by Android for this device and media."
+                      : "Use the GPU to decode video for smoother playback."}
                   </p>
                 </span>
                 <input
                   className="switch"
                   type="checkbox"
-                  checked={settings.hardwareDecode}
+                  disabled={android}
+                  checked={android || settings.hardwareDecode}
                   onChange={(e) => void save({ ...settings, hardwareDecode: e.target.checked })}
                 />
               </label>

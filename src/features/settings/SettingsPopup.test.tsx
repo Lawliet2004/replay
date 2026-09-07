@@ -26,6 +26,8 @@ const settingsFixture: Settings = {
   resumePositions: [],
 };
 
+const originalUserAgent = navigator.userAgent;
+
 const snapshot: PlayerSnapshot = {
   ...defaultSnapshot(),
   speed: 1,
@@ -57,6 +59,7 @@ describe("SettingsPopup", () => {
   afterEach(() => {
     snapshot.subtitleTracks = [];
     snapshot.playlist = { items: [], currentIndex: null, repeat: "off" };
+    vi.spyOn(navigator, "userAgent", "get").mockReturnValue(originalUserAgent);
     cleanup();
   });
 
@@ -66,6 +69,22 @@ describe("SettingsPopup", () => {
     vi.mocked(updateSettings).mockReset();
     vi.mocked(updateSettings).mockResolvedValue(settingsFixture);
     vi.mocked(dispatch).mockReset();
+  });
+
+  it("explains Android external subtitle and hardware decode limitations", async () => {
+    vi.spyOn(navigator, "userAgent", "get").mockReturnValue("Android");
+    const user = userEvent.setup();
+    const { unmount } = render(<SettingsPopup open onClose={() => {}} initialView="captions" />);
+    expect(
+      await screen.findByText(/External subtitle files are not available on Android/),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Load external subtitle/ })).toBeNull();
+    unmount();
+    render(<SettingsPopup open onClose={() => {}} initialView="playback" />);
+    const hardware = await screen.findByRole("checkbox", { name: /Hardware decode/ });
+    expect(hardware).toBeDisabled();
+    await user.click(hardware);
+    expect(updateSettings).not.toHaveBeenCalled();
   });
 
   it("renders a compact nested menu, not a right-side drawer", async () => {

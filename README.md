@@ -24,6 +24,9 @@ Linux AppImages do not bundle libmpv (`bundleMediaFramework: false`). Install `m
 
 Android is sideload-only this pass — install the arm64 APK from Releases. Replay is not on the Play Store.
 
+Release maintainers: configure [Android signing secrets](docs/android-signing.md)
+before publishing an APK. The release workflow signs and verifies APKs before upload.
+
 ## Engine / platform
 
 - **Windows, macOS, Linux**: native **libmpv** (X11/XWayland on Linux; native Wayland is not in v0.1).

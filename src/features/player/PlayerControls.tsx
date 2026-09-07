@@ -4,6 +4,9 @@ import { Timeline } from "./Timeline";
 import { setPlayerFullscreen, togglePlayerFullscreen } from "./fullscreen";
 import { formatTime } from "./time";
 import { FULLSCREEN_CLOSE_SLOT_TOP_PX } from "./chromeAutoHide";
+import { invoke } from "@tauri-apps/api/core";
+import { isAndroidPlatform } from "../../lib/platform";
+import { useToasts } from "../../components/useToasts";
 import { Icon } from "../../components/icons";
 import type { RepeatMode } from "../../generated/player";
 
@@ -21,29 +24,6 @@ function TimePair() {
     <span className="time-pair mono" aria-label={valueText} title={valueText}>
       {text}
     </span>
-  );
-}
-
-/** YouTube player fullscreen glyph (36×36). `exit` points the corners inward. */
-function FullscreenIcon({ exit }: { exit: boolean }) {
-  return (
-    <svg viewBox="0 0 36 36" className="fullscreen-glyph" aria-hidden="true">
-      {exit ? (
-        <>
-          <path d="m 14,14 -4,0 0,2 6,0 0,-6 -2,0 0,4 0,0 z" fill="currentColor" />
-          <path d="m 22,14 0,-4 -2,0 0,6 6,0 0,-2 -4,0 0,0 z" fill="currentColor" />
-          <path d="m 20,26 2,0 0,-4 4,0 0,-2 -6,0 0,6 0,0 z" fill="currentColor" />
-          <path d="m 10,22 4,0 0,4 2,0 0,-6 -6,0 0,2 0,0 z" fill="currentColor" />
-        </>
-      ) : (
-        <>
-          <path d="m 10,16 2,0 0,-4 4,0 0,-2 L 10,10 l 0,6 0,0 z" fill="currentColor" />
-          <path d="m 20,10 0,2 4,0 0,4 2,0 L 26,10 l -6,0 0,0 z" fill="currentColor" />
-          <path d="m 24,24 -4,0 0,2 L 26,26 l 0,-6 -2,0 0,4 0,0 z" fill="currentColor" />
-          <path d="M 12,20 10,20 10,26 l 6,0 0,-2 -4,0 0,-4 0,0 z" fill="currentColor" />
-        </>
-      )}
-    </svg>
   );
 }
 
@@ -138,6 +118,21 @@ export function PlayerControls({
     shallowEqual,
   );
   const playing = snap.phase === "playing";
+  const android = isAndroidPlatform();
+  const toasts = useToasts();
+  const [rotating, setRotating] = useState(false);
+  async function rotateScreen() {
+    setRotating(true);
+    try {
+      await invoke("rotate_mobile_screen");
+    } catch {
+      toasts.show("Could not rotate the screen. Try your device's rotation control.", {
+        intent: "error",
+      });
+    } finally {
+      setRotating(false);
+    }
+  }
   const selectedSub = snap.subtitleTracks.find((t) => t.selected);
   const lastSubId = useRef<number | null>(null);
   // Track the last-seen selected subtitle id in an effect, not during render
@@ -309,14 +304,30 @@ export function PlayerControls({
             <Icon name="settings" />
           </button>
 
+          {android ? (
+            <button
+              type="button"
+              className="icon-btn"
+              aria-label="Rotate screen"
+              title="Rotate screen"
+              disabled={rotating}
+              onClick={() => void rotateScreen()}
+            >
+              <Icon name="rotate" />
+            </button>
+          ) : null}
           <button
             type="button"
             className="icon-btn"
             aria-label={snap.fullscreen ? "Exit fullscreen" : "Fullscreen"}
             title={snap.fullscreen ? "Exit fullscreen (Esc)" : "Fullscreen (F)"}
-            onClick={() => void togglePlayerFullscreen(snap.fullscreen)}
+            onClick={() =>
+              void togglePlayerFullscreen(snap.fullscreen).catch(() => {
+                toasts.show("Could not change fullscreen mode.", { intent: "error" });
+              })
+            }
           >
-            <FullscreenIcon exit={snap.fullscreen} />
+            <Icon name={snap.fullscreen ? "fullscreen-exit" : "fullscreen"} />
           </button>
         </div>
       </div>

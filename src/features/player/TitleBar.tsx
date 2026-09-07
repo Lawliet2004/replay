@@ -1,6 +1,7 @@
 import { forwardRef, useCallback, useEffect, useState, type MouseEvent } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { ReplayLogo } from "../../assets/ReplayLogo";
+import { isAndroidPlatform } from "../../lib/platform";
 import { Icon } from "../../components/icons";
 import { useToasts } from "../../components/useToasts";
 
@@ -45,7 +46,7 @@ export const TitleBar = forwardRef<
 
   const onDrag = useCallback(
     (e: MouseEvent) => {
-      if (e.buttons !== 1) return;
+      if (isAndroidPlatform() || e.buttons !== 1) return;
       if (e.detail === 2) {
         void runWindowAction("toggleMaximize");
         return;

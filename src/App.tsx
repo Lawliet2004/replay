@@ -189,13 +189,16 @@ export default function App() {
 
   // Loading: hide the HWND_TOP host so HTML banners are visible.
   // Settings uses a measured overlay hole so video keeps playing around it.
+  const android = detectAppPlatform() === "android";
+  const [chromeHeight, setChromeHeight] = useState(CHROME_RESERVE_PX);
   const punchesOverlayHoles = hostPunchesOverlayHoles();
   const hostBlocked = snap.phase === "loading";
   // Title bar: always when idle; with chrome when media; never in fullscreen.
   const titlebarVisible = !snap.fullscreen && (!hasMedia || chromeVisible);
-  const windowedChromeVisible = hasMedia && chromeVisible && !hostBlocked && !snap.fullscreen;
-  const fullscreenCloseReady = hasMedia && snap.fullscreen && !hostBlocked;
-  const chromeBottomLogical = windowedChromeVisible ? CHROME_RESERVE_PX : 0;
+  const windowedChromeVisible =
+    hasMedia && chromeVisible && !hostBlocked && (!snap.fullscreen || android);
+  const fullscreenCloseReady = hasMedia && snap.fullscreen && !hostBlocked && !android;
+  const chromeBottomLogical = windowedChromeVisible ? chromeHeight : 0;
   const chromeTopLogical =
     titlebarVisible && hasMedia && !hostBlocked
       ? TITLEBAR_RESERVE_PX
@@ -207,7 +210,7 @@ export default function App() {
     !hostBlocked &&
     ((settingsOpen && !snap.fullscreen) ||
       (snap.fullscreen && closeVisible && punchesOverlayHoles));
-  const chromeReserve = windowedChromeVisible ? CHROME_RESERVE_PX : 0;
+  const chromeReserve = windowedChromeVisible ? chromeHeight : 0;
   const titlebarReserve = titlebarVisible && hasMedia ? TITLEBAR_RESERVE_PX : 0;
 
   useEffect(() => {
@@ -215,6 +218,7 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    if (android) return;
     const win = getCurrentWindow();
     let cancelled = false;
     const syncFs = async () => {
@@ -236,7 +240,7 @@ export default function App() {
       cancelled = true;
       void unResize.then((f) => f());
     };
-  }, [snap.fullscreen]);
+  }, [snap.fullscreen, android]);
 
   // Entering fullscreen: drop the windowed bars. The close chip waits for a
   // top-edge pointer move (YouTube/Chrome). Exiting restores windowed chrome.
@@ -245,13 +249,13 @@ export default function App() {
     const was = prevFullscreenRef.current;
     prevFullscreenRef.current = snap.fullscreen;
     if (snap.fullscreen === was) return;
-    if (snap.fullscreen) {
+    if (snap.fullscreen && !android) {
       forceHideUntilPointerLeave();
       dismissOverlays();
     } else {
       bumpRef.current();
     }
-  }, [snap.fullscreen, forceHideUntilPointerLeave, dismissOverlays]);
+  }, [snap.fullscreen, android, forceHideUntilPointerLeave, dismissOverlays]);
 
   const openFiles = useCallback(async () => {
     const paths = await pickMediaFiles();
@@ -361,6 +365,7 @@ export default function App() {
       const clientW = Math.max(1, Math.round(window.innerWidth * dpr));
       const clientH = Math.max(1, Math.round(window.innerHeight * dpr));
       const measuredChrome = chromeRef.current?.getBoundingClientRect().height;
+      if (measuredChrome && measuredChrome > 0) setChromeHeight(measuredChrome);
       const measuredTitle = titlebarRef.current?.getBoundingClientRect().height;
       const measuredClose = fsCloseRef.current?.getBoundingClientRect();
       // Track the chrome rect (even when hidden) so the surface-click guard
@@ -553,14 +558,14 @@ export default function App() {
   useEffect(() => {
     if (!hasMedia) return;
     const onMove = (e: PointerEvent) => {
-      if (fullscreenRef.current) {
+      if (fullscreenRef.current && !android) {
         setPointerYRef.current(e.clientY);
         return;
       }
       bumpRef.current();
     };
     const onDown = (e: PointerEvent) => {
-      if (fullscreenRef.current) {
+      if (fullscreenRef.current && !android) {
         setPointerYRef.current(e.clientY);
         return;
       }
@@ -572,7 +577,7 @@ export default function App() {
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerdown", onDown);
     };
-  }, [hasMedia, chromeVisible, titlebarVisible, snap.fullscreen]);
+  }, [hasMedia, chromeVisible, titlebarVisible, snap.fullscreen, android]);
 
   // Keyboard focus inside hidden chrome must reveal it (otherwise users tab
   // into invisible controls).
@@ -782,7 +787,7 @@ export default function App() {
         </div>
       ) : null}
 
-      {!snap.fullscreen ? (
+      {!snap.fullscreen || android ? (
         <div
           ref={chromeRef}
           className={`chrome ${windowedChromeVisible ? "visible" : ""}`}
@@ -817,7 +822,7 @@ export default function App() {
       ) : null}
 
       <SettingsPopup
-        open={settingsOpen && !snap.fullscreen}
+        open={settingsOpen && (!snap.fullscreen || android)}
         initialView={settingsView}
         onViewChange={(view) => {
           settingsViewRef.current = view;

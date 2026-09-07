@@ -11,6 +11,8 @@ node_modules
 dist
 dist-ssr
 *.local
+*.jks
+*.keystore
 
 # Editor / Tool Cache
 .vscode/*
@@ -39,6 +41,8 @@ tools/7z*.exe
 # Rust / Tauri
 src-tauri/target
 src-tauri/gen
+src-tauri/plugins/replay-media3/android/.tauri
+src-tauri/plugins/replay-media3/android/build
 
 # TS build info
 *.tsbuildinfo

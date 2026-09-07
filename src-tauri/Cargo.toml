@@ -1,6 +1,6 @@
 [package]
 name = "replay"
-version = "0.2.0"
+version = "0.2.1"
 description = "Replay — a focused local desktop media player"
 authors = ["Replay Contributors"]
 edition = "2021"

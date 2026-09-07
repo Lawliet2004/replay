@@ -64,3 +64,15 @@ pub fn invoke_engine_call<R: Runtime>(
         Ok(())
     }
 }
+
+/// Read a native playback sample on the actor thread, never on Android's UI thread.
+#[cfg(target_os = "android")]
+pub fn playback_state<R: Runtime>(app: &AppHandle<R>) -> Result<Value> {
+    use tauri::Manager;
+    let api = app
+        .try_state::<PluginApi<R>>()
+        .ok_or_else(|| Error::Plugin("replay-media3 plugin is not registered".into()))?;
+    api.handle
+        .run_mobile_plugin("getPlaybackState", serde_json::json!({}))
+        .map_err(|e| Error::Plugin(e.to_string()))
+}

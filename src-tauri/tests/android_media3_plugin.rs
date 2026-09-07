@@ -16,6 +16,6 @@ fn media3_plugin_sources_are_wired() {
     assert!(plugin.contains("fun load("));
     assert!(plugin.contains("fun play("));
     assert!(plugin.contains("fun pause("));
-    assert!(plugin.contains("SurfaceView"));
+    assert!(plugin.contains("PlayerView"));
     assert!(plugin.contains("TRANSPARENT"));
 }

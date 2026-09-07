@@ -1,8 +1,14 @@
 package app.replay.media3
 
 import android.app.Activity
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import android.graphics.Color
-import android.view.SurfaceView
+import android.content.pm.ActivityInfo
+import android.content.res.Configuration
+import androidx.media3.ui.PlayerView
+import androidx.media3.ui.AspectRatioFrameLayout
 import android.view.View
 import android.view.ViewGroup
 import android.webkit.WebView
@@ -52,17 +58,33 @@ class SurfaceArgs {
     var h: Int = 0
 }
 
+@InvokeArg
+class TrackArgs {
+    lateinit var kind: String
+    var trackId: Int? = null
+}
+
+@InvokeArg
+class FullscreenArgs {
+    var fullscreen: Boolean = false
+}
+
+@androidx.media3.common.util.UnstableApi
 @TauriPlugin
 class ReplayMedia3Plugin(private val activity: Activity) : Plugin(activity) {
     private var player: Media3Player? = null
-    private var surface: SurfaceView? = null
+    private var surface: PlayerView? = null
     private var surfaceVisible: Boolean = false
 
     override fun load(webView: WebView) {
         activity.runOnUiThread {
             webView.setBackgroundColor(Color.TRANSPARENT)
             val parent = webView.parent as? ViewGroup ?: return@runOnUiThread
-            val sv = SurfaceView(activity)
+            val sv = PlayerView(activity).apply {
+                useController = false
+                resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
+                setBackgroundColor(Color.BLACK)
+            }
             sv.visibility = if (surfaceVisible) View.VISIBLE else View.GONE
             val params = FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -152,13 +174,53 @@ class ReplayMedia3Plugin(private val activity: Activity) : Plugin(activity) {
     }
 
     @Command
+    fun getPlaybackState(invoke: Invoke) {
+        activity.runOnUiThread {
+            val current = player
+            if (current == null) invoke.reject("Media3 is not initialized.")
+            else invoke.resolve(current.playbackState())
+        }
+    }
+
+    @Command
+    fun setFullscreen(invoke: Invoke) {
+        val args = invoke.parseArgs(FullscreenArgs::class.java)
+        activity.runOnUiThread {
+            val controller = WindowCompat.getInsetsController(activity.window, activity.window.decorView)
+            controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            if (args.fullscreen) controller.hide(WindowInsetsCompat.Type.systemBars())
+            else controller.show(WindowInsetsCompat.Type.systemBars())
+            invoke.resolve()
+        }
+    }
+
+    @Command
+    fun rotateScreen(invoke: Invoke) {
+        activity.runOnUiThread {
+            activity.requestedOrientation = if (activity.resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE)
+                ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT
+            else ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+            invoke.resolve()
+        }
+    }
+
+    @Command
     fun selectTrack(invoke: Invoke) {
-        invoke.resolve()
+        val args = invoke.parseArgs(TrackArgs::class.java)
+        activity.runOnUiThread {
+            try {
+                val current = player ?: throw IllegalStateException("Media3 is not initialized.")
+                current.selectTrack(args.kind, args.trackId)
+                invoke.resolve()
+            } catch (error: Exception) {
+                invoke.reject(error.message ?: "Could not select track.")
+            }
+        }
     }
 
     @Command
     fun addSubtitle(invoke: Invoke) {
-        invoke.resolve()
+        invoke.reject("External subtitle files are not supported on Android yet.")
     }
 
     @Command

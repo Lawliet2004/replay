@@ -118,6 +118,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             ipc::player_command,
+            ipc::rotate_mobile_screen,
+            ipc::set_mobile_fullscreen,
             ipc::get_snapshot,
             ipc::get_settings,
             ipc::update_settings,

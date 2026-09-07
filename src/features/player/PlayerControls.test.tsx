@@ -1,9 +1,12 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { invoke } from "@tauri-apps/api/core";
 import closeIconSvg from "../../assets/close_icon.svg?raw";
 import { defaultSnapshot } from "../../generated/player";
 import { FullscreenCloseButton, PlayerControls } from "./PlayerControls";
 import { setPlayerFullscreen, togglePlayerFullscreen } from "./fullscreen";
+
+const originalUserAgent = navigator.userAgent;
 
 const snapshot = {
   ...defaultSnapshot(),
@@ -27,8 +30,10 @@ vi.mock("./store", () => ({
     select ? select(snapshot) : snapshot,
 }));
 
+vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn().mockResolvedValue(undefined) }));
+
 vi.mock("./fullscreen", () => ({
-  togglePlayerFullscreen: vi.fn(),
+  togglePlayerFullscreen: vi.fn().mockResolvedValue(true),
   setPlayerFullscreen: vi.fn(),
 }));
 
@@ -37,6 +42,7 @@ describe("PlayerControls", () => {
     snapshot.fullscreen = false;
     vi.mocked(togglePlayerFullscreen).mockClear();
     vi.mocked(setPlayerFullscreen).mockClear();
+    vi.spyOn(navigator, "userAgent", "get").mockReturnValue(originalUserAgent);
     cleanup();
   });
 
@@ -57,11 +63,11 @@ describe("PlayerControls", () => {
     expect(bar.contains(seek)).toBe(true);
   });
 
-  it("uses the YouTube fullscreen glyph and toggles OS fullscreen", () => {
+  it("uses the shared fullscreen glyph and toggles OS fullscreen", () => {
     render(<PlayerControls onToggleSettings={vi.fn()} />);
     const btn = screen.getByRole("button", { name: "Fullscreen" });
-    expect(btn.querySelector("svg")?.getAttribute("viewBox")).toBe("0 0 36 36");
-    expect(btn.querySelector("svg")?.querySelectorAll("path")).toHaveLength(4);
+    expect(btn.querySelector("svg")?.getAttribute("viewBox")).toBe("0 0 24 24");
+    expect(btn.querySelector("svg")?.querySelectorAll("path")).toHaveLength(1);
     fireEvent.click(btn);
     expect(togglePlayerFullscreen).toHaveBeenCalledWith(false);
   });
@@ -70,9 +76,19 @@ describe("PlayerControls", () => {
     snapshot.fullscreen = true;
     render(<PlayerControls onToggleSettings={vi.fn()} />);
     const btn = screen.getByRole("button", { name: "Exit fullscreen" });
-    expect(btn.querySelector("svg")?.getAttribute("viewBox")).toBe("0 0 36 36");
+    expect(btn.querySelector("svg")?.getAttribute("viewBox")).toBe("0 0 24 24");
     fireEvent.click(btn);
     expect(togglePlayerFullscreen).toHaveBeenCalledWith(true);
+  });
+
+  it("only offers native rotation on Android", async () => {
+    const { unmount } = render(<PlayerControls onToggleSettings={vi.fn()} />);
+    expect(screen.queryByRole("button", { name: "Rotate screen" })).toBeNull();
+    unmount();
+    vi.spyOn(navigator, "userAgent", "get").mockReturnValue("Android");
+    render(<PlayerControls onToggleSettings={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "Rotate screen" }));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("rotate_mobile_screen"));
   });
 
   it("exposes a top-edge close chip that exits fullscreen", () => {

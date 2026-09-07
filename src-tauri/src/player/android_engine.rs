@@ -114,8 +114,23 @@ pub fn map_command(cmd: &PlayerCommand) -> Result<AndroidEngineCall, AndroidMapE
     }
 }
 
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AndroidPlaybackState {
+    pub position_secs: f64,
+    pub duration_secs: f64,
+    pub phase: crate::player::model::PlayerPhase,
+    pub audio_tracks: Vec<crate::player::model::Track>,
+    pub subtitle_tracks: Vec<crate::player::model::Track>,
+    pub error: Option<String>,
+    pub metadata: Option<crate::player::model::MediaMetadata>,
+}
+
 /// Native Media3 (or a test double) that executes mapped engine calls.
 pub trait AndroidPlaybackEngine: Send {
+    fn playback_state(&mut self) -> Result<Option<AndroidPlaybackState>, AppError> {
+        Ok(None)
+    }
     fn apply(&mut self, call: &AndroidEngineCall) -> Result<(), AppError>;
     fn set_surface_bounds(&mut self, x: i32, y: i32, w: u32, h: u32) -> Result<(), AppError> {
         let _ = (x, y, w, h);
@@ -131,9 +146,13 @@ pub trait AndroidPlaybackEngine: Send {
 #[derive(Clone, Default)]
 pub struct RecordingEngine {
     pub calls: Arc<Mutex<Vec<AndroidEngineCall>>>,
+    pub state: Arc<Mutex<Option<AndroidPlaybackState>>>,
 }
 
 impl AndroidPlaybackEngine for RecordingEngine {
+    fn playback_state(&mut self) -> Result<Option<AndroidPlaybackState>, AppError> {
+        Ok(self.state.lock().clone())
+    }
     fn apply(&mut self, call: &AndroidEngineCall) -> Result<(), AppError> {
         self.calls.lock().push(call.clone());
         Ok(())
@@ -154,6 +173,13 @@ impl MobileEngine {
 
 #[cfg(target_os = "android")]
 impl AndroidPlaybackEngine for MobileEngine {
+    fn playback_state(&mut self) -> Result<Option<AndroidPlaybackState>, AppError> {
+        let value = tauri_plugin_replay_media3::playback_state(&self.app)
+            .map_err(|e| AppError::new(ErrorCode::EngineInit, e.to_string(), true))?;
+        serde_json::from_value(value)
+            .map(Some)
+            .map_err(|e| AppError::new(ErrorCode::EngineInit, e.to_string(), true))
+    }
     fn apply(&mut self, call: &AndroidEngineCall) -> Result<(), AppError> {
         tauri_plugin_replay_media3::invoke_engine_call(
             &self.app,

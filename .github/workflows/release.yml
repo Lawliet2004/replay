@@ -71,6 +71,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Check Android signing secrets
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          for name in ANDROID_KEYSTORE_BASE64 ANDROID_KEYSTORE_PASSWORD ANDROID_KEY_ALIAS ANDROID_KEY_PASSWORD; do
+            if [ -z "${!name}" ]; then
+              echo "::error::Missing $name. See docs/android-signing.md."
+              exit 1
+            fi
+          done
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -85,6 +98,8 @@ jobs:
           java-version: 17
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
+      - name: Install APK signing tools
+        run: sdkmanager "build-tools;35.0.0"
       - name: Setup Android NDK
         uses: nttld/setup-ndk@v1
         id: setup-ndk
@@ -104,34 +119,45 @@ jobs:
           fi
       - name: Build APK
         run: npx tauri android build --apk --target aarch64
-      - name: Upload arm64 APK to draft release
+      - name: Sign and verify release APK
+        id: signed-apk
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
           set -euo pipefail
-          TAG="${{ github.ref_name }}"
-          NOTES="${{ env.RELEASE_NOTES }}"
-          APK=""
-          if [ -d src-tauri/gen/android/app/build/outputs/apk ]; then
-            APK="$(find src-tauri/gen/android/app/build/outputs/apk -type f \( -name '*arm64*.apk' -o -name '*aarch64*.apk' \) -print -quit || true)"
-            if [ -z "$APK" ]; then
-              APK="$(find src-tauri/gen/android/app/build/outputs/apk -type f -name '*.apk' -print -quit || true)"
-            fi
-          fi
-          if [ -z "$APK" ] && [ -d src-tauri/target ]; then
-            APK="$(find src-tauri/target -type f -name '*.apk' -print -quit || true)"
-          fi
-          if [ -z "$APK" ] || [ ! -f "$APK" ]; then
-            echo "No APK found under src-tauri/gen/android/app/build/outputs/apk or src-tauri/target"
-            ls -R src-tauri/gen/android/app/build/outputs 2>/dev/null || true
+          mapfile -d '' apks < <(find src-tauri/gen/android/app/build/outputs/apk -type f -path '*/release/*' -name '*.apk' -print0)
+          if [ "${#apks[@]}" -ne 1 ]; then
+            echo "::error::Expected exactly one release APK; found ${#apks[@]}."
             exit 1
           fi
-          echo "Uploading $APK"
+          umask 077
+          signing_dir="$(mktemp -d "$RUNNER_TEMP/android-signing.XXXXXX")"
+          trap 'rm -rf -- "$signing_dir"' EXIT
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$signing_dir/release.jks"
+          build_tools="$ANDROID_HOME/build-tools/35.0.0"
+          "$build_tools/zipalign" -f -P 16 4 "${apks[0]}" "$signing_dir/aligned.apk"
+          ASSET="$RUNNER_TEMP/Replay-${GITHUB_REF_NAME}-android-aarch64.apk"
+          "$build_tools/apksigner" sign --ks "$signing_dir/release.jks" \
+            --ks-key-alias "$ANDROID_KEY_ALIAS" \
+            --ks-pass env:ANDROID_KEYSTORE_PASSWORD --key-pass env:ANDROID_KEY_PASSWORD \
+            --v4-signing-enabled false --out "$ASSET" "$signing_dir/aligned.apk"
+          "$build_tools/apksigner" verify --verbose --print-certs "$ASSET"
+          "$build_tools/zipalign" -c -P 16 4 "$ASSET"
+          echo "path=$ASSET" >> "$GITHUB_OUTPUT"
+      - name: Upload signed arm64 APK to draft release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ASSET: ${{ steps.signed-apk.outputs.path }}
+        run: |
+          set -euo pipefail
+          TAG="$GITHUB_REF_NAME"
+          NOTES="$RELEASE_NOTES"
           if ! gh release view "$TAG" >/dev/null 2>&1; then
             gh release create "$TAG" --draft --title "Replay ${TAG}" --notes "$NOTES"
           fi
-          ASSET="Replay-${TAG}-android-aarch64.apk"
-          cp "$APK" "$ASSET"
           gh release upload "$TAG" "$ASSET" --clobber
 
   publish:

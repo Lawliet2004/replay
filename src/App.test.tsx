@@ -4,6 +4,8 @@ import { defaultSnapshot } from "./generated/player";
 import { FULLSCREEN_CLOSE_IDLE_MS } from "./features/player/chromeAutoHide";
 import App from "./App";
 
+const originalUserAgent = navigator.userAgent;
+
 const snapshot = {
   ...defaultSnapshot(),
   phase: "playing" as const,
@@ -72,6 +74,7 @@ vi.mock("./features/player/fullscreen", () => ({
 describe("windowed vs fullscreen chrome", () => {
   afterEach(() => {
     snapshot.fullscreen = false;
+    vi.spyOn(navigator, "userAgent", "get").mockReturnValue(originalUserAgent);
     cleanup();
   });
 
@@ -83,6 +86,15 @@ describe("windowed vs fullscreen chrome", () => {
     expect(screen.getByLabelText("Seek")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Fullscreen" })).toBeInTheDocument();
     expect(document.querySelector(".fullscreen-close")).toBeNull();
+  });
+
+  it("keeps seeking and rotation accessible in Android fullscreen", () => {
+    vi.spyOn(navigator, "userAgent", "get").mockReturnValue("Android");
+    snapshot.fullscreen = true;
+    render(<App />);
+    expect(screen.getByRole("region", { name: "Playback controls" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Rotate screen" })).toBeInTheDocument();
+    expect(screen.getByLabelText("Seek")).toBeInTheDocument();
   });
 
   it("hides windowed chrome in fullscreen and does not show a corner restore button", () => {

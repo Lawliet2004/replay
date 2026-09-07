@@ -66,6 +66,7 @@ pub(crate) struct AndroidPlayerActor {
     settings: SettingsStore,
     snapshot: PlayerSnapshot,
     engine: Box<dyn AndroidPlaybackEngine>,
+    last_resume_save: std::time::Instant,
 }
 
 impl AndroidPlayerActor {
@@ -95,14 +96,79 @@ impl AndroidPlayerActor {
             settings,
             snapshot,
             engine,
+            last_resume_save: std::time::Instant::now(),
         }
     }
 
     fn run(&mut self, cmd_rx: Receiver<PlayerCommand>) {
-        while let Ok(cmd) = cmd_rx.recv() {
-            self.handle_command(cmd);
+        let interval = std::time::Duration::from_millis(250);
+        let mut next_sample = std::time::Instant::now() + interval;
+        loop {
+            match cmd_rx
+                .recv_timeout(next_sample.saturating_duration_since(std::time::Instant::now()))
+            {
+                Ok(cmd) => self.handle_command(cmd),
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+            if std::time::Instant::now() >= next_sample {
+                self.poll_engine();
+                next_sample = std::time::Instant::now() + interval;
+            }
         }
         let _ = self.settings.save();
+    }
+
+    fn poll_engine(&mut self) {
+        if self.playlist.current().is_none() || self.snapshot.phase == PlayerPhase::Error {
+            return;
+        }
+        match self.engine.playback_state() {
+            Ok(Some(state)) => {
+                if let Some(message) = state.error {
+                    self.fail(AppError::new(ErrorCode::EngineInit, message, true));
+                    return;
+                }
+                self.snapshot.position_secs = state.position_secs.max(0.0);
+                self.snapshot.duration_secs = state.duration_secs.max(0.0);
+                self.snapshot.metadata = state.metadata;
+                self.snapshot.audio_tracks = state.audio_tracks;
+                self.snapshot.subtitle_tracks = state.subtitle_tracks;
+                let newly_ended = state.phase == PlayerPhase::Ended && !self.snapshot.eof_reached;
+                self.snapshot.eof_reached = state.phase == PlayerPhase::Ended;
+                if self.settings.get().resume_enabled {
+                    if let Some(item) = self.playlist.current() {
+                        self.settings.set_resume(
+                            &item.path,
+                            if self.snapshot.eof_reached {
+                                0.0
+                            } else {
+                                self.snapshot.position_secs
+                            },
+                        );
+                        if self.last_resume_save.elapsed() >= std::time::Duration::from_secs(5)
+                            || state.phase != self.snapshot.phase
+                        {
+                            self.settings.save_async();
+                            self.last_resume_save = std::time::Instant::now();
+                        }
+                    }
+                }
+                self.set_phase(state.phase);
+                if newly_ended
+                    && (self.settings.get().autoplay_next
+                        || self.snapshot.playlist.repeat != crate::player::model::RepeatMode::Off)
+                {
+                    if let Err(err) = self.dispatch_playlist(PlayerCommand::Next {
+                        request_id: "eof".into(),
+                    }) {
+                        self.fail(err);
+                    }
+                }
+            }
+            Ok(None) => {}
+            Err(err) => self.fail(err),
+        }
     }
 
     fn bump(&mut self) {
@@ -337,7 +403,10 @@ impl AndroidPlayerActor {
                 self.emit_snapshot();
             }
             PlayerCommand::ClearPlaylist { .. } => {
+                self.engine.apply(&AndroidEngineCall::Pause)?;
                 self.playlist.clear();
+                self.snapshot.position_secs = 0.0;
+                self.snapshot.duration_secs = 0.0;
                 self.snapshot.current = None;
                 self.snapshot.metadata = None;
                 self.set_phase(PlayerPhase::Idle);
@@ -352,6 +421,9 @@ impl AndroidPlayerActor {
                         })?;
                         self.after_engine_load(&item.path);
                     } else {
+                        self.engine.apply(&AndroidEngineCall::Pause)?;
+                        self.snapshot.position_secs = 0.0;
+                        self.snapshot.duration_secs = 0.0;
                         self.set_phase(PlayerPhase::Idle);
                     }
                 } else {
@@ -447,7 +519,35 @@ impl AndroidPlayerActor {
         self.snapshot.metadata = None;
         self.snapshot.audio_tracks.clear();
         self.snapshot.subtitle_tracks.clear();
-        self.snapshot.position_secs = self.settings.resume_for(uri).unwrap_or(0.0);
+        self.snapshot.position_secs = 0.0;
+        self.snapshot.duration_secs = 0.0;
+        // Apply persisted playback preferences to the actual engine too.
+        let calls = [
+            AndroidEngineCall::SetVolume {
+                volume: self.snapshot.volume,
+            },
+            AndroidEngineCall::SetMuted {
+                muted: self.snapshot.muted,
+            },
+            AndroidEngineCall::SetSpeed {
+                speed: self.snapshot.speed,
+            },
+        ];
+        for call in calls {
+            if let Err(err) = self.engine.apply(&call) {
+                self.fail(err);
+                return;
+            }
+        }
+        if let Some(position) = self.settings.resume_for(uri) {
+            if let Err(err) = self.engine.apply(&AndroidEngineCall::Seek {
+                position_ms: (position * 1000.0) as i64,
+                absolute: true,
+            }) {
+                self.fail(err);
+                return;
+            }
+        }
         tracing::info!(
             path = %crate::player::model::redact_path(uri),
             "android load"
@@ -501,6 +601,9 @@ mod tests {
             got,
             vec![
                 AndroidEngineCall::Load { uri: uri.into() },
+                AndroidEngineCall::SetVolume { volume: 100.0 },
+                AndroidEngineCall::SetMuted { muted: false },
+                AndroidEngineCall::SetSpeed { speed: 1.0 },
                 AndroidEngineCall::Pause,
                 AndroidEngineCall::Play,
                 AndroidEngineCall::Seek {
@@ -510,6 +613,116 @@ mod tests {
             ]
         );
         assert_eq!(actor.snapshot.phase, PlayerPhase::Seeking);
+    }
+
+    #[test]
+    fn native_progress_updates_duration_and_recovers_from_seeking() {
+        struct ProgressEngine;
+        impl AndroidPlaybackEngine for ProgressEngine {
+            fn apply(&mut self, _: &AndroidEngineCall) -> Result<(), AppError> {
+                Ok(())
+            }
+            fn playback_state(
+                &mut self,
+            ) -> Result<Option<crate::player::android_engine::AndroidPlaybackState>, AppError>
+            {
+                Ok(Some(
+                    serde_json::from_value(serde_json::json!({
+                        "positionSecs": 150.0, "durationSecs": 300.0, "phase": "playing",
+                        "audioTracks": [], "subtitleTracks": [], "error": null
+                    }))
+                    .unwrap(),
+                ))
+            }
+        }
+        let (mut actor, _dir) = actor(RecordingEngine::default());
+        actor.engine = Box::new(ProgressEngine);
+        actor.handle_command(PlayerCommand::OpenPaths {
+            request_id: "1".into(),
+            paths: vec!["content://media/1".into()],
+            replace: true,
+        });
+        actor.snapshot.phase = PlayerPhase::Seeking;
+        actor.poll_engine();
+        assert_eq!(actor.snapshot.duration_secs, 300.0);
+        assert_eq!(actor.snapshot.position_secs, 150.0);
+        assert_eq!(actor.snapshot.phase, PlayerPhase::Playing);
+    }
+
+    #[test]
+    fn eof_respects_autoplay_and_only_advances_once() {
+        for autoplay in [false, true] {
+            let engine = RecordingEngine::default();
+            let state = engine.state.clone();
+            let calls = engine.calls.clone();
+            let (mut actor, _dir) = actor(engine);
+            actor.settings.get_mut().autoplay_next = autoplay;
+            actor.handle_command(PlayerCommand::OpenPaths {
+                request_id: "1".into(),
+                paths: vec!["content://media/1".into(), "content://media/2".into()],
+                replace: true,
+            });
+            *state.lock() = Some(
+                serde_json::from_value(serde_json::json!({
+                    "positionSecs": 300, "durationSecs": 300, "phase": "ended",
+                    "audioTracks": [], "subtitleTracks": [], "error": null
+                }))
+                .unwrap(),
+            );
+            calls.lock().clear();
+            actor.poll_engine();
+            assert_eq!(
+                actor.playlist.snapshot().current_index,
+                Some(if autoplay { 1 } else { 0 })
+            );
+            if autoplay {
+                assert!(calls.lock().contains(&AndroidEngineCall::Load {
+                    uri: "content://media/2".into()
+                }));
+            } else {
+                actor.poll_engine();
+                assert!(calls.lock().is_empty());
+                assert_eq!(actor.snapshot.phase, PlayerPhase::Ended);
+            }
+        }
+    }
+
+    #[test]
+    fn clearing_queue_pauses_native_playback_and_resets_time() {
+        let engine = RecordingEngine::default();
+        let calls = engine.calls.clone();
+        let (mut actor, _dir) = actor(engine);
+        actor.handle_command(PlayerCommand::OpenPaths {
+            request_id: "1".into(),
+            paths: vec!["content://media/1".into()],
+            replace: true,
+        });
+        calls.lock().clear();
+        actor.handle_command(PlayerCommand::ClearPlaylist {
+            request_id: "2".into(),
+        });
+        assert_eq!(*calls.lock(), vec![AndroidEngineCall::Pause]);
+        assert_eq!(actor.snapshot.position_secs, 0.0);
+        assert_eq!(actor.snapshot.duration_secs, 0.0);
+        assert_eq!(actor.snapshot.phase, PlayerPhase::Idle);
+    }
+
+    #[test]
+    fn resume_seeks_native_player_when_enabled() {
+        let engine = RecordingEngine::default();
+        let calls = engine.calls.clone();
+        let (mut actor, _dir) = actor(engine);
+        actor.settings.get_mut().resume_enabled = true;
+        actor.settings.set_resume("content://media/1", 80.0);
+        actor.handle_command(PlayerCommand::OpenPaths {
+            request_id: "1".into(),
+            paths: vec!["content://media/1".into()],
+            replace: true,
+        });
+        assert!(calls.lock().contains(&AndroidEngineCall::Seek {
+            position_ms: 80000,
+            absolute: true
+        }));
     }
 
     #[test]

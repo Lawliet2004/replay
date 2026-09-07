@@ -7,6 +7,7 @@ import type { CSSProperties, SVGProps } from "react";
  * map to the --icon-size-* tokens; omit `size` for the default 1.2rem.
  */
 export type IconName =
+  | "rotate"
   | "play"
   | "pause"
   | "previous"
@@ -41,14 +42,16 @@ export type IconName =
   | "error";
 
 const PATHS: Record<IconName, string> = {
-  play: "M8 5v14l11-7z",
-  pause: "M7 5h3v14H7zM14 5h3v14h-3z",
+  rotate: "M20 7V3m0 4h-4M20 7a9 9 0 0 0-15-2M4 17v4m0-4h4M4 17a9 9 0 0 0 15 2M9 8h6v8H9z",
+  play: "M8 5.8c0-.8.8-1.2 1.5-.8l10 6.2c.6.4.6 1.2 0 1.6l-10 6.2c-.7.4-1.5 0-1.5-.8z",
+  pause:
+    "M7 5h2a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1ZM15 5h2a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1h-2a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1Z",
   previous: "M6 6h2v12H6zm3.5 6 8.5 6V6z",
   next: "M16 6h2v12h-2zM6 6v12l8.5-6z",
   captions:
     "M4 5h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2zM10 10a2.5 2.5 0 1 0 0 4M18 10a2.5 2.5 0 1 0 0 4",
   settings:
-    "M4 6h3m4 0h9M4 12h9m4 0h3M4 18h3m4 0h9M11 6a2 2 0 1 1-4 0 2 2 0 0 1 4 0ZM17 12a2 2 0 1 1-4 0 2 2 0 0 1 4 0ZM11 18a2 2 0 1 1-4 0 2 2 0 0 1 4 0Z",
+    "M10 3h4l.6 2.3 1.6.9 2.3-.6 2 3.5-1.7 1.7v2.4l1.7 1.7-2 3.5-2.3-.6-1.6.9L14 21h-4l-.6-2.3-1.6-.9-2.3.6-2-3.5 1.7-1.7v-2.4L3.5 9.1l2-3.5 2.3.6 1.6-.9L10 3ZM15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z",
   speed:
     "M4 18a9 9 0 1 1 16 0M12 13l4-5M7 8l1 1M5 13h1M18 13h1M12 5v1M14 15a2 2 0 1 1-4 0 2 2 0 0 1 4 0Z",
   search: "M16 10a6 6 0 1 1-12 0 6 6 0 0 1 12 0ZM15 15l5 5",
@@ -138,7 +141,7 @@ export function Icon({ name, size = "md", filled, ...rest }: IconProps) {
       focusable="false"
       fill={isFill ? "currentColor" : "none"}
       stroke={isFill ? "none" : "currentColor"}
-      strokeWidth={1.5}
+      strokeWidth={1.75}
       strokeLinecap="round"
       strokeLinejoin="round"
       style={{ display: "block" } as CSSProperties}

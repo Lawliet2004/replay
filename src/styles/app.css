@@ -2403,3 +2403,81 @@ select {
     transform: scale(1.08);
   }
 }
+
+/* Shared playback chrome stays opaque above native video hosts. */
+.titlebar {
+  background: #15171b;
+}
+.chrome {
+  background: #15171b;
+}
+.controls-row .icon-btn {
+  border-radius: 10px;
+}
+.controls-row .icon-btn.play {
+  background: #f0b65c;
+  color: #17130c;
+}
+.controls-row .icon-btn.play:hover {
+  background: #f4c77e;
+}
+.controls-row .icon-btn svg {
+  width: 22px;
+  height: 22px;
+}
+.timeline-range {
+  touch-action: none;
+  min-height: 32px;
+}
+.app[data-platform="android"] .titlebar {
+  padding-top: env(safe-area-inset-top, 0px);
+  padding-left: max(12px, env(safe-area-inset-left, 0px));
+  padding-right: max(12px, env(safe-area-inset-right, 0px));
+}
+.app[data-platform="android"] .chrome {
+  padding-bottom: max(8px, env(safe-area-inset-bottom, 0px));
+  padding-left: max(12px, env(safe-area-inset-left, 0px));
+  padding-right: max(12px, env(safe-area-inset-right, 0px));
+}
+.app[data-platform="android"] .settings-popup {
+  max-height: calc(
+    100dvh - 150px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px)
+  );
+  width: min(380px, calc(100% - 24px));
+  left: auto;
+}
+@media (max-width: 600px) {
+  .controls-row {
+    flex-wrap: wrap;
+    gap: 4px;
+  }
+  .controls-row .time-pair {
+    display: inline;
+    margin-left: auto;
+  }
+  .controls-row .volume input {
+    display: none;
+  }
+  .controls-row .controls-group.end {
+    flex-basis: 100%;
+    justify-content: flex-end;
+  }
+  .controls-row .icon-btn {
+    min-width: 44px;
+    min-height: 44px;
+  }
+  .controls-row .controls-group {
+    gap: 0;
+  }
+}
+
+.app[data-platform="android"].is-fullscreen .chrome.visible {
+  opacity: 1 !important;
+  pointer-events: auto !important;
+}
+.app[data-platform="android"] .titlebar {
+  height: calc(40px + env(safe-area-inset-top, 0px));
+}
+.app[data-platform="android"] .settings-popup {
+  max-height: calc(100dvh - var(--chrome-reserve, 84px) - 60px - env(safe-area-inset-top, 0px));
+}
